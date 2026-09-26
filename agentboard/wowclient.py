@@ -1308,7 +1308,9 @@ def _watch(
             with state_lock:
                 return dispatch_live(action, state=state, channel=channel)
 
-        live_hub = live_module.LiveBridge(snapshot=live_snapshot, action=live_action)
+        # A snapshot costs a few milliseconds and only a changed board wakes the
+        # overlay, so a short interval is what makes streamed replies feel live.
+        live_hub = live_module.LiveBridge(snapshot=live_snapshot, action=live_action, interval=0.25)
         live_hub.start()
 
     while True:

@@ -9,7 +9,6 @@ const badgeText = badge.querySelector('.badge-text')
 const rowsEl = document.getElementById('rows')
 const emptyEl = document.getElementById('empty')
 const liveStateEl = document.getElementById('live-state')
-const sidebarCount = document.getElementById('sidebar-count')
 const searchInput = document.getElementById('search-input')
 const welcomeEl = document.getElementById('welcome')
 const detailEl = document.getElementById('session-detail')
@@ -146,10 +145,36 @@ function sessionMatchesSearch(session) {
   return haystack.includes(search)
 }
 
+// The list is grouped by what the session wants from you, not by provider:
+// anything blocked on you first, then live work, then replies you have not
+// read, then everything you have already seen.
+const GROUPS = [
+  { key: 'needs', label: 'Needs you' },
+  { key: 'running', label: 'Running' },
+  { key: 'unread', label: 'New replies' },
+  { key: 'seen', label: 'Seen' }
+]
+
+function sessionGroup(session) {
+  if (session.approval_request_id || session.user_input_request_id || ['needs', 'error'].includes(session.status)) return 'needs'
+  if (['working', 'waiting', 'starting'].includes(session.status)) return 'running'
+  if (session.status === 'reply') return 'unread'
+  return 'seen'
+}
+
+function rowStatus(session) {
+  if (session.approval_request_id) return 'Needs approval'
+  if (session.user_input_request_id) return 'Needs an answer'
+  const labels = { needs: 'Asked you something', error: 'Error', working: 'Running', waiting: 'Starting', starting: 'Starting', reply: 'Unread reply', finished: 'Finished', idle: 'Idle' }
+  return labels[session.status] || session.status_label || session.status || ''
+}
+
 function visibleSessions() {
+  const order = Object.fromEntries(GROUPS.map((group, index) => [group.key, index]))
   return [...(board.sessions || [])]
     .filter(sessionMatchesSearch)
-    .sort((left, right) => Number(right.activity_at || 0) - Number(left.activity_at || 0))
+    .sort((left, right) => (order[sessionGroup(left)] - order[sessionGroup(right)]) ||
+      Number(right.activity_at || 0) - Number(left.activity_at || 0))
 }
 
 function selectedSession() {
@@ -166,8 +191,17 @@ function renderBadge() {
   badge.title = `${state.label}\n${state.detail}\nSuper+Alt+C to toggle`
 }
 
+let rowsKey = ''
+
 function renderRows() {
   const sessions = visibleSessions()
+  // A roster update arrives several times a second while agents run; rebuilding
+  // identical rows would reset hover and focus for nothing.
+  const key = JSON.stringify([selectedId, sessions.map(session => [session.id, session.status, session.title, session.activity,
+    session.age_s < 60 ? 0 : Math.floor(session.age_s / 60), session.approval_request_id, session.user_input_request_id, session.project])])
+  if (key === rowsKey && (selectedId || !sessions.length)) return
+  rowsKey = key
+  const focusedId = document.activeElement?.closest?.('.row')?.dataset.id
   const scroll = rowsEl.scrollTop
   rowsEl.replaceChildren()
   emptyEl.hidden = sessions.length > 0
@@ -178,13 +212,28 @@ function renderRows() {
     composerInput.value = drafts.get(selectedId) || ''
   }
 
+  let currentGroup = null
   for (const session of sessions) {
+    const group = sessionGroup(session)
+    if (group !== currentGroup) {
+      currentGroup = group
+      const heading = document.createElement('div')
+      heading.className = `group-heading ${group}`
+      const label = document.createElement('span')
+      label.textContent = GROUPS.find(item => item.key === group).label
+      const count = document.createElement('span')
+      count.className = 'group-count'
+      count.textContent = String(sessions.filter(item => sessionGroup(item) === group).length)
+      heading.append(label, count)
+      rowsEl.append(heading)
+    }
     const row = document.createElement('div')
+    row.dataset.id = session.id
     row.tabIndex = 0
     row.addEventListener('keydown', event => {
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSession(session.id, true) }
     })
-    row.className = `row${session.id === selectedId ? ' selected' : ''}`
+    row.className = `row ${group}${session.id === selectedId ? ' selected' : ''}`
     row.setAttribute('role', 'option')
     row.setAttribute('aria-selected', session.id === selectedId ? 'true' : 'false')
 
@@ -196,31 +245,48 @@ function renderRows() {
     const title = document.createElement('div')
     title.className = 'row-title'
     title.textContent = session.title || '(untitled)'
-    const meta = document.createElement('div')
-    meta.className = 'row-meta'
-    meta.textContent = [session.project || session.source, providerLabel(session)].filter(Boolean).join(' / ')
-    const activity = document.createElement('div')
-    activity.className = 'row-activity'
-    activity.textContent = session.activity || session.status_label || ''
-    main.append(title, meta, activity)
+    const status = document.createElement('div')
+    status.className = `row-status ${session.status}`
+    const statusWord = document.createElement('span')
+    statusWord.className = 'row-status-word'
+    statusWord.textContent = rowStatus(session)
+    status.append(statusWord)
+    // The status word already says what kind of state this is; the activity
+    // text only adds something when it says more than the label.
+    const detail = group === 'seen' ? '' : (session.activity || '')
+    if (detail && detail !== session.status_label && detail !== rowStatus(session)) {
+      const activity = document.createElement('span')
+      activity.className = 'row-activity'
+      activity.textContent = ` · ${detail}`
+      status.append(activity)
+    }
+    const where = [session.project || session.source, providerLabel(session)].filter(Boolean).join(' · ')
+    if (group === 'seen') {
+      // Two lines are enough for something already dealt with.
+      const meta = document.createElement('span')
+      meta.className = 'row-activity'
+      meta.textContent = where ? ` · ${where}` : ''
+      status.append(meta)
+      main.append(title, status)
+    } else {
+      const meta = document.createElement('div')
+      meta.className = 'row-meta'
+      meta.textContent = where
+      main.append(title, status, meta)
+    }
 
-    const side = document.createElement('div')
-    side.className = 'row-side'
     const rowAge = document.createElement('div')
     rowAge.className = 'row-age'
     rowAge.textContent = age(session.age_s)
-    const provider = document.createElement('div')
-    provider.className = 'provider-tag'
-    provider.textContent = session.provider || ''
-    side.append(rowAge, provider)
 
-    row.append(dot, main, side)
+    row.append(dot, main, rowAge)
     row.addEventListener('click', () => selectSession(session.id, true))
     rowsEl.append(row)
   }
   rowsEl.scrollTop = scroll
-  sessionWindow.textContent = `${sessions.length} useful sessions`
-  sidebarCount.textContent = String(sessions.length)
+  if (focusedId) rowsEl.querySelector(`.row[data-id="${CSS.escape(focusedId)}"]`)?.focus()
+  const running = sessions.filter(session => sessionGroup(session) === 'running').length
+  sessionWindow.textContent = `${sessions.length} sessions${running ? ` · ${running} running` : ''}`
 }
 
 function conversationMessages(session) {
@@ -235,43 +301,99 @@ function conversationMessages(session) {
   return messages
 }
 
+function messageNode(session, message) {
+  const wrap = document.createElement('div')
+  const label = document.createElement('div')
+  label.className = 'message-role'
+  const bodyEl = document.createElement('div')
+  bodyEl.className = 'message-body'
+  const copy = document.createElement('button')
+  copy.type = 'button'
+  copy.className = 'copy-message'
+  copy.textContent = 'Copy'
+  copy.setAttribute('aria-label', 'Copy message')
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(bodyEl.textContent || ''); copy.textContent = 'Copied' }
+    catch (error) { setActionStatus(`Could not copy: ${error.message}`, true) }
+  })
+  label.append(document.createTextNode(''), copy)
+  wrap.append(label, bodyEl)
+  updateMessageNode(wrap, session, message)
+  return wrap
+}
+
+function updateMessageNode(wrap, session, message) {
+  const role = message.role === 'user' ? 'user' : 'agent'
+  const className = `message ${role}${message.pending ? ' pending' : ''}`
+  if (wrap.className !== className) wrap.className = className
+  const labelText = role === 'user' ? 'You' : providerLabel(session)
+  if (wrap.firstChild.firstChild.nodeValue !== labelText) wrap.firstChild.firstChild.nodeValue = labelText
+  // Only touch text that changed, so a streaming reply grows in place and a
+  // selection in an earlier message survives the update.
+  const bodyEl = wrap.lastChild
+  if (bodyEl.textContent !== (message.text || '')) bodyEl.textContent = message.text || ''
+  wrap.dataset.key = message.id || `${role}:${message.created_at || ''}`
+}
+
+let conversationSession = null
+let workingEl = null
+
 function renderConversation(session) {
   const messages = conversationMessages(session)
-  const key = JSON.stringify([session.id, messages])
+  const running = ['working', 'waiting', 'starting'].includes(session.status)
+  const key = JSON.stringify([session.id, messages, running, running && session.activity])
   if (key === conversationKey) return
   conversationKey = key
-  conversationEl.replaceChildren()
+
+  if (conversationSession !== session.id) {
+    conversationSession = session.id
+    conversationEl.replaceChildren()
+  }
+  conversationEl.querySelector('.message-empty')?.remove()
+  workingEl?.remove()
+  workingEl = null
+
+  const nodes = [...conversationEl.querySelectorAll(':scope > .message')]
+  messages.forEach((message, index) => {
+    const role = message.role === 'user' ? 'user' : 'agent'
+    const node = nodes[index]
+    const key = message.id || `${role}:${message.created_at || ''}`
+    // Reuse the node when it is the same message; a window that slid (older
+    // messages dropped off the top) or a different message rebuilds from here.
+    if (node && node.dataset.key === key && node.classList.contains(role)) {
+      updateMessageNode(node, session, message)
+    } else {
+      for (const stale of nodes.slice(index)) stale.remove()
+      nodes.length = index
+      const fresh = messageNode(session, message)
+      conversationEl.append(fresh)
+      nodes.push(fresh)
+    }
+  })
+  for (const stale of nodes.slice(messages.length)) stale.remove()
+
   if (!messages.length) {
     const empty = document.createElement('div')
     empty.className = 'message-empty'
     empty.textContent = 'No messages in this session yet.'
     conversationEl.append(empty)
-    return
   }
+  if (running) {
+    workingEl = workingIndicator(session)
+    conversationEl.append(workingEl)
+  }
+}
 
-  for (const message of messages) {
-    const role = message.role === 'user' ? 'user' : 'agent'
-    const wrap = document.createElement('div')
-    wrap.className = `message ${role}${message.pending ? ' pending' : ''}`
-    const label = document.createElement('div')
-    label.className = 'message-role'
-    label.textContent = role === 'user' ? 'You' : providerLabel(session)
-    const bodyEl = document.createElement('div')
-    bodyEl.className = 'message-body'
-    bodyEl.textContent = message.text || ''
-    const copy = document.createElement('button')
-    copy.type = 'button'
-    copy.className = 'copy-message'
-    copy.textContent = 'Copy'
-    copy.setAttribute('aria-label', 'Copy message')
-    copy.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(message.text || ''); copy.textContent = 'Copied' }
-      catch (error) { setActionStatus(`Could not copy: ${error.message}`, true) }
-    })
-    label.append(copy)
-    wrap.append(label, bodyEl)
-    conversationEl.append(wrap)
-  }
+function workingIndicator(session) {
+  const line = document.createElement('div')
+  line.className = 'message-working'
+  const dots = document.createElement('span')
+  dots.className = 'working-dots'
+  dots.append(document.createElement('i'), document.createElement('i'), document.createElement('i'))
+  const text = document.createElement('span')
+  text.textContent = session.activity && session.activity !== session.status_label ? session.activity : 'Working'
+  line.append(dots, text)
+  return line
 }
 
 function renderDetail({ preserveScroll = false } = {}) {

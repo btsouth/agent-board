@@ -55,6 +55,33 @@ class LiveBridgeTest(unittest.TestCase):
         self.assertTrue(second["unchanged"])
         self.assertNotIn("board", second)
 
+    def test_an_unchanged_board_keeps_its_revision(self):
+        first = self.request({"type": "state"})["revision"]
+        time.sleep(0.35)  # several polls of an identical snapshot
+        self.assertEqual(self.request({"type": "state"})["revision"], first)
+
+    def test_a_waiting_request_wakes_on_the_next_change(self):
+        board = {"sessions": [{"id": "thread-123", "text": "Hel"}]}
+        bridge = live.LiveBridge(snapshot=lambda: dict(board), action=self.action, interval=0.05,
+                                 path=Path(self.temp.name) / "wait.sock")
+        bridge.start()
+        self.addCleanup(bridge.stop)
+        bridge.wait_ready(timeout=2)
+        self.socket_path = Path(self.temp.name) / "wait.sock"
+        revision = self.request({"type": "state"})["revision"]
+        board["sessions"] = [{"id": "thread-123", "text": "Hello"}]
+        started = time.monotonic()
+        response = self.request({"type": "state", "revision": revision, "wait": 1.5})
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(response["board"]["sessions"][0]["text"], "Hello")
+
+    def test_a_waiting_request_times_out_as_unchanged(self):
+        revision = self.request({"type": "state"})["revision"]
+        started = time.monotonic()
+        response = self.request({"type": "state", "revision": revision, "wait": 0.4})
+        self.assertGreaterEqual(time.monotonic() - started, 0.35)
+        self.assertTrue(response["unchanged"])
+
     def test_actions_go_through_the_bridge_callback(self):
         action = {"kind": "reply", "session_id": "thread-123", "text": "hello"}
         response = self.request({"type": "action", "action": action})

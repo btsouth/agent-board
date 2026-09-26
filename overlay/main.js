@@ -352,14 +352,20 @@ function liveRequest(payload, timeout = 8000) {
   })
 }
 
-async function refreshLive() {
+async function refreshLive(wait = 0) {
   if (refreshingLive) return false
   refreshingLive = true
-  try { return await fetchLive() } finally { refreshingLive = false }
+  try { return await fetchLive(wait) } finally { refreshingLive = false }
 }
 
-async function fetchLive() {
-  const response = await liveRequest({ type: 'state', revision: lastLiveRevision })
+async function fetchLive(wait = 0) {
+  // With a known revision the bridge holds the request until the board changes
+  // (or the wait runs out), so updates arrive as they happen, not on a timer.
+  const waiting = wait > 0 && lastLiveRevision >= 0
+  const response = await liveRequest(
+    { type: 'state', revision: lastLiveRevision, ...(waiting ? { wait } : {}) },
+    waiting ? (wait + 5) * 1000 : 8000
+  )
   if (response.ok && response.unchanged) {
     send('wow:live', { connected: true, revision: response.revision })
     return true
@@ -397,9 +403,22 @@ async function liveAction(action) {
   return response
 }
 
+const LIVE_WAIT_S = 20
+
 function startRosterLoop() {
-  void refreshLive()
-  rosterTimer = setInterval(() => void refreshLive(), LIVE_POLL_MS)
+  let stopped = false
+  rosterTimer = { stop: () => { stopped = true } }
+  void (async () => {
+    while (!stopped) {
+      const started = Date.now()
+      const before = lastLiveRevision
+      const ok = await refreshLive(LIVE_WAIT_S)
+      // A failed request, or a bridge too old to hold the request open, answers
+      // at once with nothing new; fall back to the poll interval instead of spinning.
+      const quickAndUnchanged = lastLiveRevision === before && Date.now() - started < 100
+      if (!ok || quickAndUnchanged) await new Promise(resolve => setTimeout(resolve, LIVE_POLL_MS))
+    }
+  })()
 }
 
 function runSelfTest() {

@@ -19,6 +19,9 @@ from typing import Any, Callable
 
 
 MAX_MESSAGE = 1_048_576
+# How long one state request may wait for a change. The overlay long-polls, so a
+# new revision reaches it as soon as it exists instead of at the next poll tick.
+MAX_WAIT = 25.0
 
 
 def socket_path() -> Path:
@@ -71,7 +74,9 @@ class LiveBridge:
         self._stop = threading.Event()
         self._ready = threading.Event()
         self._lock = threading.Lock()
+        self._changed = threading.Condition(self._lock)
         self._latest: dict[str, Any] = {"error": "live bridge has not published yet"}
+        self._latest_key = ""
         self._revision = 0
         self._poll_thread: threading.Thread | None = None
         self._server: _ThreadingUnixServer | None = None
@@ -97,6 +102,8 @@ class LiveBridge:
 
     def stop(self) -> None:
         self._stop.set()
+        with self._changed:
+            self._changed.notify_all()
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -125,6 +132,15 @@ class LiveBridge:
                 known_revision = int(request.get("revision", -1))
             except (TypeError, ValueError):
                 known_revision = -1
+            try:
+                wait = min(MAX_WAIT, max(0.0, float(request.get("wait", 0) or 0)))
+            except (TypeError, ValueError):
+                wait = 0.0
+            if wait and known_revision == self._revision:
+                with self._changed:
+                    self._changed.wait_for(
+                        lambda: self._revision != known_revision or self._stop.is_set(), timeout=wait
+                    )
             if known_revision == self._revision:
                 return {"ok": True, "revision": self._revision, "unchanged": True}
             return {"ok": True, **self.latest()}
@@ -148,8 +164,17 @@ class LiveBridge:
                     raise TypeError("snapshot must be an object")
             except Exception as exc:  # noqa: BLE001 - serve the error to the overlay
                 board = {"error": str(exc), "sessions": [], "counts": {}}
-            with self._lock:
-                self._latest = board
-                self._revision += 1
+            # A new revision only when something changed, so an idle board costs
+            # the overlay nothing and a waiting request wakes exactly on a change.
+            try:
+                key = json.dumps(board, sort_keys=True, separators=(",", ":"), default=str)
+            except (TypeError, ValueError):
+                key = ""
+            with self._changed:
+                if not key or key != self._latest_key or self._revision == 0:
+                    self._latest = board
+                    self._latest_key = key
+                    self._revision += 1
+                    self._changed.notify_all()
             self._ready.set()
             self._stop.wait(max(0.05, self._interval - (time.monotonic() - started)))
