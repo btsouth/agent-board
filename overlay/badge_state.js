@@ -10,11 +10,14 @@ function badgeState(board, connected, queued = 0) {
   const elapsed = seconds => seconds < 60 ? 'just now' : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : `${Math.floor(seconds / 3600)}h ago`
   // Unread replies count too, but an older bridge without `unread` must not
   // turn every past session into news.
-  const fresh = sessions.filter(session => available(session) && session.unread === true && session.status === 'reply')
+  // "New" means ended recently and unread, the same rule as the board's
+  // "Just finished" group.
+  const fresh = sessions.filter(session => available(session) && session.unread === true &&
+    ['reply', 'error'].includes(session.status) && Number(session.age_s || 0) <= 3 * 3600)
   const parts = []
   if (requests.length) parts.push(`${requests.length} need${requests.length === 1 ? 's' : ''} you`)
   if (running.length) parts.push(`${running.length} running`)
-  if (fresh.length && parts.length < 2) parts.push(parts.length ? `${fresh.length} new` : `${fresh.length} new repl${fresh.length === 1 ? 'y' : 'ies'}`)
+  if (fresh.length && parts.length < 2) parts.push(`${fresh.length} finished`)
   const label = parts.length ? parts.join(' · ') : 'Idle'
   let detail = running[0]?.title || 'Ready when you are'
   if (latest) detail = `Last reply ${elapsed(Number(latest.age_s || 0))} · ${latest.title || 'Untitled session'}`

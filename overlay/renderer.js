@@ -150,35 +150,45 @@ function sessionMatchesSearch(session) {
 }
 
 // The list is grouped by what the session wants from you, not by provider:
-// anything blocked on you first, then live work, then replies you have not
-// read, then everything you have already seen.
+// only a real request blocks on you; then live work; then what just ended and
+// you have not read; then everything else, including news that has gone stale.
 const GROUPS = [
   { key: 'needs', label: 'Needs you' },
   { key: 'running', label: 'Running' },
-  { key: 'unread', label: 'New replies' },
-  { key: 'seen', label: 'Seen' }
+  { key: 'recent', label: 'Just finished' },
+  { key: 'earlier', label: 'Earlier' }
 ]
+// How long an ending counts as "just finished": unread output for three
+// hours, anything at all for half an hour. Past that it is something you have
+// probably seen elsewhere, and it steps back.
+const RECENT_SECONDS = 3 * 3600
+const JUST_ENDED_SECONDS = 30 * 60
 
 // Older bridges do not send `unread`; treat that as unread so nothing hides.
 function isUnread(session) {
   return session.unread !== false
 }
 
+// Unread output: a reply, a failure, or a question in the last message.
+function hasNews(session) {
+  if (['reply', 'error', 'needs'].includes(session.status)) return isUnread(session)
+  return session.status === 'finished' && session.unread === true
+}
+
 function sessionGroup(session) {
-  if (session.approval_request_id || session.user_input_request_id || session.status === 'needs') return 'needs'
-  // A failure you have already looked at is history, not a call to action.
-  if (session.status === 'error') return isUnread(session) ? 'needs' : 'seen'
+  if (session.approval_request_id || session.user_input_request_id) return 'needs'
   if (['working', 'waiting', 'starting'].includes(session.status)) return 'running'
-  if (session.status === 'reply' && isUnread(session)) return 'unread'
-  if (session.status === 'finished' && session.unread === true) return 'unread'
-  return 'seen'
+  const age = Number(session.age_s || 0)
+  if (hasNews(session) && age <= RECENT_SECONDS) return 'recent'
+  if (['reply', 'error', 'needs', 'finished'].includes(session.status) && age <= JUST_ENDED_SECONDS) return 'recent'
+  return 'earlier'
 }
 
 function rowStatus(session) {
   if (session.approval_request_id) return 'Needs approval'
   if (session.user_input_request_id) return 'Needs an answer'
-  if (session.status === 'error') return isUnread(session) ? 'Failed' : 'Failed · seen'
-  const labels = { needs: 'Asked you something', working: 'Running', waiting: 'Starting', starting: 'Starting', reply: 'Unread reply', finished: 'Finished', idle: 'Idle' }
+  if (session.status === 'error') return 'Failed'
+  const labels = { needs: 'Asked a question', working: 'Running', waiting: 'Starting', starting: 'Starting', reply: 'Unread reply', finished: 'Finished', idle: 'Idle' }
   if (session.status === 'reply' && !isUnread(session)) return 'Finished'
   return labels[session.status] || session.status_label || session.status || ''
 }
@@ -188,9 +198,7 @@ let autoReadTimer = null
 function scheduleAutoRead(session) {
   clearTimeout(autoReadTimer)
   if (!session || mode !== 'board' || !connected) return
-  const group = sessionGroup(session)
-  const news = group === 'unread' || (session.status === 'error' && group === 'needs')
-  if (!news || !(session.capabilities || []).includes('mark_read')) return
+  if (!hasNews(session) || !(session.capabilities || []).includes('mark_read')) return
   autoReadTimer = setTimeout(() => {
     const current = selectedSession()
     if (!current || current.id !== session.id || mode !== 'board' || document.hidden) return
@@ -317,8 +325,8 @@ function renderRows() {
     status.append(statusWord)
     // The status word already says what kind of state this is; the activity
     // text only adds something when it says more than the label.
-    const detail = group === 'seen' ? ''
-      : group === 'unread' || session.status === 'needs' ? (session.snippet || session.activity || '')
+    const detail = group === 'earlier' ? ''
+      : group === 'recent' && session.status !== 'error' ? (session.snippet || session.activity || '')
         : (session.activity || '')
     if (detail && detail !== session.status_label && detail !== rowStatus(session)) {
       const activity = document.createElement('span')
@@ -327,7 +335,7 @@ function renderRows() {
       status.append(activity)
     }
     const where = [session.project || session.source, providerLabel(session)].filter(Boolean).join(' · ')
-    if (group === 'seen') {
+    if (group === 'earlier') {
       // Two lines are enough for something already dealt with.
       const meta = document.createElement('span')
       meta.className = 'row-activity'
@@ -618,7 +626,7 @@ function renderDetail({ preserveScroll = false } = {}) {
   answerButton.textContent = session.user_input_questions?.length ? 'Send answers' : 'Answer request'
   composerInput.placeholder = hasInput ? 'Answer the request above' : 'Message this session'
   composerInput.disabled = Boolean(session.user_input_questions?.length)
-  markReadButton.hidden = !Number(session.activity_at || 0) || sessionGroup(session) === 'seen' || sessionGroup(session) === 'running'
+  markReadButton.hidden = !Number(session.activity_at || 0) || !hasNews(session)
   stopButton.hidden = !(['working', 'waiting', 'needs'].includes(session.status) && (session.capabilities || []).includes('stop'))
   const done = doneAction(session)
   doneButton.hidden = !done
@@ -657,7 +665,7 @@ function rowMenuItems(session) {
   const can = kind => (session.capabilities || []).includes(kind)
   const act = kind => () => void menuAction(session, kind)
   const running = ['working', 'waiting', 'starting'].includes(session.status)
-  const unread = sessionGroup(session) === 'unread' || (session.status === 'error' && sessionGroup(session) === 'needs')
+  const unread = hasNews(session)
   const done = doneAction(session)
   const items = [{ label: 'Open', run: () => selectSession(session.id, true) }, 'separator']
   if (unread && can('mark_read')) items.push({ label: 'Mark read', run: act('mark_read') })

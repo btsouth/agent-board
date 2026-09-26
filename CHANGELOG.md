@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 addon and the bridge version independently and the payload is versioned by
 `schema`.
 
+## [0.2.2] - 2026-09-26
+
+### Changed
+
+- Needs you holds only real requests: an approval or a question the agent is
+  blocked on. Failures and questions in a finished reply no longer land there.
+- Running comes next, then Just finished: anything that ended in the last half
+  hour, and unread replies or failures from the last three hours.
+- Everything else moves to Earlier, dimmed, including unread news that has gone
+  stale. It can still be marked read from the right-click menu.
+- The badge counts recently finished work ("2 running · 3 finished").
+
 ## [0.2.1] - 2026-09-26
 
 ### Added

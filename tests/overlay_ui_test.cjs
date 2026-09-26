@@ -57,7 +57,11 @@ const output = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-board-ui-'))
  await page.evaluate(()=>handlers.mode({mode:'board'}))
  await page.screenshot({path:path.join(output,'board.png')})
  // Grouping: blocked on you, then running, then unread, then seen.
- assert.deepEqual(await page.locator('.group-heading > span:first-child').allTextContents(),['Needs you','Running','New replies'])
+  assert.deepEqual(await page.locator('.group-heading > span:first-child').allTextContents(),['Running','Just finished'])
+ // Only a real request is "Needs you"; stale news falls to Earlier.
+ await page.evaluate(()=>{testBoard.sessions[2].approval_request_id='req';testBoard.sessions[1].age_s=5*3600;handlers.roster(testBoard)})
+ assert.deepEqual(await page.locator('.group-heading > span:first-child').allTextContents(),['Needs you','Running','Earlier'])
+ await page.evaluate(()=>{delete testBoard.sessions[2].approval_request_id;testBoard.sessions[1].age_s=120;handlers.roster(testBoard)})
  // A streaming reply grows in place: same node, new text, nothing rebuilt.
  await page.getByRole('option').filter({hasText:'Running task'}).click()
  await page.evaluate(()=>{testBoard.sessions[0].conversation=[{id:'m1',role:'user',text:'start'},{id:'m2',role:'agent',text:'Hel'}];handlers.roster(testBoard)})
