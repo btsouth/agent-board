@@ -130,6 +130,7 @@ function renderBlocks(parent, blocks, doc, options) {
     if (block.type === 'code') {
       const wrap = doc.createElement('div')
       wrap.className = 'md-code'
+      wrap.codeText = block.text
       const head = doc.createElement('div')
       head.className = 'md-code-head'
       const lang = doc.createElement('span')
@@ -140,7 +141,7 @@ function renderBlocks(parent, blocks, doc, options) {
         copy.type = 'button'
         copy.className = 'md-copy'
         copy.textContent = 'Copy'
-        copy.addEventListener('click', () => options.onCopy(block.text, copy))
+        copy.addEventListener('click', () => options.onCopy(wrap.codeText, copy))
         head.append(copy)
       }
       const pre = doc.createElement('pre')
@@ -194,8 +195,29 @@ function renderBlocks(parent, blocks, doc, options) {
 
 function renderMarkdown(parent, text, options = {}) {
   const doc = parent.ownerDocument
-  parent.replaceChildren()
-  renderBlocks(parent, parseBlocks(text), doc, options)
+  const blocks = parseBlocks(text)
+  const existing = [...parent.children]
+  blocks.forEach((block, index) => {
+    const signature = JSON.stringify(block)
+    let node = existing[index]
+    if (node?.markdownSignature === signature) return
+    // Preserve completed blocks, code scroll positions and copy-button focus
+    // while the final block grows. Copy always reads the latest code.
+    if (node?.classList.contains('md-code') && block.type === 'code' && node.codeLanguage === block.lang) {
+      node.codeText = block.text
+      node.querySelector('code').textContent = block.text
+    } else {
+      const fragment = doc.createDocumentFragment()
+      renderBlocks(fragment, [block], doc, options)
+      const fresh = fragment.firstChild
+      if (node) node.replaceWith(fresh)
+      else parent.append(fresh)
+      node = fresh
+    }
+    node.markdownSignature = signature
+    node.codeLanguage = block.lang
+  })
+  for (const node of existing.slice(blocks.length)) node.remove()
 }
 
 function renderInline(parent, text) {

@@ -52,13 +52,22 @@ let search = ''
 let mode = 'badge'
 let connected = false
 let busy = false
+let startingSession = false
+let addingProject = false
+let queueKey = ''
+let actionStatusTimer = null
+let modalReturnFocus = null
+let scrollFrame = null
 let lastDetailId = null
 let statusTimer = null
 let selectedProjectId = null
 const provisionalProjects = new Map()
 const pendingMessages = new Map()
 let savedDrafts = {}
-try { savedDrafts = JSON.parse(localStorage.getItem('composer-drafts-v1') || '{}') } catch {}
+try {
+  const stored = JSON.parse(localStorage.getItem('composer-drafts-v1') || '{}')
+  if (stored && typeof stored === 'object' && !Array.isArray(stored)) savedDrafts = stored
+} catch {}
 const drafts = new Map(Object.entries(savedDrafts))
 function saveDraft() {
   if (!selectedId) return
@@ -68,9 +77,9 @@ function saveDraft() {
 }
 function fitComposer() {
   composerInput.style.height = 'auto'
-  composerInput.style.height = `${Math.min(composerInput.scrollHeight + 2, 180)}px`
+  composerInput.style.height = `${Math.min(composerInput.scrollHeight + 2, window.innerHeight <= 540 ? 90 : 180)}px`
 }
-composerInput.addEventListener('input', () => { saveDraft(); fitComposer() })
+composerInput.addEventListener('input', () => { saveDraft(); fitComposer(); updateControls() })
 window.addEventListener('beforeunload', saveDraft)
 const queue = new window.MessageQueue({
   storage: localStorage,
@@ -79,13 +88,16 @@ const queue = new window.MessageQueue({
 })
 
 function renderQueue(session) {
-  queueEl.replaceChildren()
   const items = queue.list(session)
   queueEl.hidden = items.length === 0
-  const active = queue.active(session) || items.length > 0
+  const active = queue.active(session) || items.length > 0 || !providerAvailable(session.provider)
   sendButton.textContent = session.user_input_request_id ? 'Answer' : active ? 'Queue message' : 'Send'
   sendNowButton.hidden = !active || Boolean(session.user_input_request_id)
-  sendNowButton.disabled = !connected || Boolean(session.approval_request_id || session.user_input_request_id)
+  updateControls()
+  const key = JSON.stringify([session.id, items, busy, providerAvailable(session.provider), session.approval_request_id, session.user_input_request_id, queue.inflight.has(queue.key(session))])
+  if (key === queueKey) return
+  queueKey = key
+  queueEl.replaceChildren()
   for (const item of items) {
     const row = document.createElement('div')
     row.className = 'queued-message'
@@ -104,14 +116,14 @@ function renderQueue(session) {
       const now = document.createElement('button')
       now.className = 'button quiet'
       now.textContent = item.state === 'held' ? 'Retry now' : 'Send now'
-      now.disabled = !connected || Boolean(session.approval_request_id || session.user_input_request_id) || queue.inflight.has(queue.key(session))
+      now.disabled = busy || !providerAvailable(session.provider) || Boolean(session.approval_request_id || session.user_input_request_id) || queue.inflight.has(queue.key(session))
       now.addEventListener('click', () => void queue.sendNow(item.id, session))
       const edit = document.createElement('button')
       edit.className = 'button quiet'
       edit.textContent = 'Edit'
       edit.addEventListener('click', () => {
         const removed = queue.remove(item.id)
-        if (removed) { composerInput.value = [composerInput.value, removed.text].filter(Boolean).join('\n\n'); saveDraft() }
+        if (removed) { composerInput.value = [composerInput.value, removed.text].filter(Boolean).join('\n\n'); saveDraft(); fitComposer(); updateControls() }
         composerInput.focus()
       })
       const remove = document.createElement('button')
@@ -197,11 +209,12 @@ function rowStatus(session) {
 let autoReadTimer = null
 function scheduleAutoRead(session) {
   clearTimeout(autoReadTimer)
-  if (!session || mode !== 'board' || !connected) return
+  if (!session || mode !== 'board' || !providerAvailable(session.provider)) return
   if (!hasNews(session) || !(session.capabilities || []).includes('mark_read')) return
   autoReadTimer = setTimeout(() => {
     const current = selectedSession()
-    if (!current || current.id !== session.id || mode !== 'board' || document.hidden) return
+    if (!current || current.id !== session.id || mode !== 'board' || document.hidden || !providerAvailable(session.provider)) return
+    if (conversationEl.scrollHeight - conversationEl.clientHeight - conversationEl.scrollTop >= 60) return
     void safeAction({ kind: 'mark_read', provider: session.provider, host: session.host || 'local', session_id: session.id, text: String(session.activity_at || '') })
   }, 1500)
 }
@@ -264,14 +277,16 @@ function renderRows() {
   const sessions = visibleSessions()
   // A roster update arrives several times a second while agents run; rebuilding
   // identical rows would reset hover and focus for nothing.
-  const key = JSON.stringify([selectedId, sessions.map(session => [session.id, session.status, session.title, session.activity,
-    session.age_s < 60 ? 0 : Math.floor(session.age_s / 60), session.approval_request_id, session.user_input_request_id, session.project])])
+  const key = JSON.stringify([search, selectedId, sessions.map(session => [session.id, session.status, session.title, session.activity,
+    session.age_s < 60 ? 0 : Math.floor(session.age_s / 60), session.approval_request_id, session.user_input_request_id, session.project,
+    session.unread, session.snippet, session.source, session.provider_label, session.status_label, sessionGroup(session)])])
   if (key === rowsKey && (selectedId || !sessions.length)) return
   rowsKey = key
   const focusedId = document.activeElement?.closest?.('.row')?.dataset.id
   const scroll = rowsEl.scrollTop
   rowsEl.replaceChildren()
   emptyEl.hidden = sessions.length > 0
+  emptyEl.textContent = search ? 'No sessions match your search.' : 'No active or recent sessions.'
 
   if (!selectedId && sessions.length) {
     selectedId = sessions[0].id
@@ -296,7 +311,7 @@ function renderRows() {
     }
     const row = document.createElement('div')
     row.dataset.id = session.id
-    row.tabIndex = 0
+    row.tabIndex = session.id === selectedId || !sessions.some(item => item.id === selectedId) && session === sessions[0] ? 0 : -1
     row.addEventListener('keydown', event => {
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSession(session.id, true) }
       if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
@@ -453,7 +468,7 @@ function displayItems(messages) {
     if (message.role === 'tool') {
       const last = items[items.length - 1]
       if (last?.role === 'steps') last.steps.push(message)
-      else items.push({ role: 'steps', id: `steps:${message.id}`, steps: [message] })
+      else items.push({ role: 'steps', id: `steps:${message.id || message.created_at || items.length}`, steps: [message] })
     } else items.push(message)
   }
   return items
@@ -478,14 +493,15 @@ function updateStepsNode(wrap, item) {
   wrap.dataset.key = item.id
   const [count, last] = wrap.firstChild.children
   count.textContent = `${item.steps.length} step${item.steps.length === 1 ? '' : 's'}`
-  last.replaceChildren()
-  window.renderInline?.(last, item.steps[item.steps.length - 1].text)
+  const latest = item.steps.at(-1).text
+  if (last.stepText !== latest) { window.renderInline?.(last, latest); last.stepText = latest }
   const list = wrap.lastChild
   const rows = [...list.children]
   item.steps.forEach((step, index) => {
     let row = rows[index]
     if (!row) { row = document.createElement('li'); list.append(row) }
-    if (row.dataset.key !== step.id) {
+    if (row.dataset.key !== step.id || row.stepText !== step.text) {
+      row.stepText = step.text
       row.dataset.key = step.id
       row.replaceChildren()
       window.renderInline?.(row, step.text)
@@ -498,7 +514,7 @@ function updateStepsNode(wrap, item) {
 function renderConversation(session) {
   const messages = displayItems(conversationMessages(session))
   const running = ['working', 'waiting', 'starting'].includes(session.status)
-  const key = JSON.stringify([session.id, messages, running, running && session.activity])
+  const key = JSON.stringify([session.id, Array.isArray(session.conversation), providerLabel(session), messages, running, providerAvailable(session.provider), running && session.activity])
   if (key === conversationKey) return
   conversationKey = key
 
@@ -507,30 +523,24 @@ function renderConversation(session) {
     conversationEl.replaceChildren()
   }
   conversationEl.querySelector('.message-empty')?.remove()
-  workingEl?.remove()
-  workingEl = null
-
-  const nodes = [...conversationEl.querySelectorAll(':scope > .message')]
+  const oldNodes = [...conversationEl.querySelectorAll(':scope > .message')]
+  const available = new Map(oldNodes.map(node => [node.dataset.key, node]))
+  const nodes = []
   messages.forEach((message, index) => {
     const role = message.role === 'steps' ? 'steps' : message.role === 'user' ? 'user' : 'agent'
-    const node = nodes[index]
-    const key = message.id || `${role}:${message.created_at || ''}`
-    // Reuse the node when it is the same message; a window that slid (older
-    // messages dropped off the top) or a different message rebuilds from here.
-    if (node && node.dataset.key === key && node.classList.contains(role)) {
-      if (role === 'steps') updateStepsNode(node, message)
-      else updateMessageNode(node, session, message)
-    } else {
-      for (const stale of nodes.slice(index)) stale.remove()
-      nodes.length = index
-      let fresh
-      if (role === 'steps') { fresh = stepsNode(); updateStepsNode(fresh, message) }
-      else fresh = messageNode(session, message)
-      conversationEl.append(fresh)
-      nodes.push(fresh)
-    }
+    const key = message.id || `${role}:${message.created_at || index}`
+    let node = available.get(key)
+    if (!node?.classList.contains(role)) node = null
+    if (!node) node = role === 'steps' ? stepsNode() : messageNode(session, message)
+    if (role === 'steps') updateStepsNode(node, message)
+    else updateMessageNode(node, session, message)
+    node.dataset.key = key
+    const at = conversationEl.children[index]
+    if (at !== node) conversationEl.insertBefore(node, at || null)
+    available.delete(key)
+    nodes.push(node)
   })
-  for (const stale of nodes.slice(messages.length)) stale.remove()
+  for (const stale of oldNodes) if (!nodes.includes(stale)) stale.remove()
   // One label per run of messages from the same speaker, as in a chat client.
   nodes.slice(0, messages.length).forEach((node, index) => {
     // Steps do not interrupt a speaker's run: the agent working and then
@@ -546,13 +556,14 @@ function renderConversation(session) {
   if (!messages.length) {
     const empty = document.createElement('div')
     empty.className = 'message-empty'
-    empty.textContent = 'No messages in this session yet.'
+    empty.textContent = Array.isArray(session.conversation) ? 'No messages in this session yet.' : 'Loading conversation…'
     conversationEl.append(empty)
   }
-  if (running) {
-    workingEl = workingIndicator(session)
+  if (running && providerAvailable(session.provider)) {
+    if (!workingEl || !conversationEl.contains(workingEl)) workingEl = workingIndicator(session)
+    workingEl.lastChild.textContent = session.activity && session.activity !== session.status_label ? session.activity : 'Working'
     conversationEl.append(workingEl)
-  }
+  } else { workingEl?.remove(); workingEl = null }
 }
 
 function workingIndicator(session) {
@@ -572,11 +583,11 @@ let lastDetailNews = false
 let lastScrollHeight = 0
 const jumpLatest = document.getElementById('jump-latest')
 jumpLatest.addEventListener('click', () => {
-  conversationEl.scrollTo({ top: conversationEl.scrollHeight, behavior: 'smooth' })
+  conversationEl.scrollTo({ top: conversationEl.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
   jumpLatest.hidden = true
 })
 conversationEl.addEventListener('scroll', () => {
-  if (conversationEl.scrollHeight - conversationEl.clientHeight - conversationEl.scrollTop < 60) jumpLatest.hidden = true
+  jumpLatest.hidden = conversationEl.scrollHeight - conversationEl.clientHeight - conversationEl.scrollTop < 60
 })
 
 function renderDetail({ preserveScroll = false } = {}) {
@@ -596,6 +607,9 @@ function renderDetail({ preserveScroll = false } = {}) {
 
   const previousScroll = conversationEl.scrollTop
   const nearBottom = conversationEl.scrollHeight - conversationEl.clientHeight - previousScroll < 60
+  const top = conversationEl.getBoundingClientRect().top
+  const anchor = [...conversationEl.children].find(node => node.classList.contains('message') && node.getBoundingClientRect().bottom > top)
+  const anchorOffset = anchor ? anchor.getBoundingClientRect().top - top : 0
   welcomeEl.hidden = true
   detailEl.hidden = false
   detailProvider.textContent = providerLabel(session)
@@ -607,7 +621,7 @@ function renderDetail({ preserveScroll = false } = {}) {
     age(session.age_s) === 'now' ? 'active now' : `${age(session.age_s)} ago`
   ].filter(Boolean).join(' / ')
   detailStatus.className = `status-pill ${session.status}`
-  detailStatus.textContent = session.status_label || session.status
+  detailStatus.textContent = rowStatus(session)
 
   const hasApproval = Boolean(session.approval_request_id)
   const hasInput = Boolean(session.user_input_request_id)
@@ -625,10 +639,11 @@ function renderDetail({ preserveScroll = false } = {}) {
   renderQuestions(session)
   answerButton.hidden = !hasInput
   answerButton.textContent = session.user_input_questions?.length ? 'Send answers' : 'Answer request'
+  composerInput.closest('.composer-wrap').hidden = Boolean(session.user_input_questions?.length)
   composerInput.placeholder = hasInput ? 'Answer the request above' : 'Message this session'
-  composerInput.disabled = Boolean(session.user_input_questions?.length)
-  markReadButton.hidden = !Number(session.activity_at || 0) || !hasNews(session)
-  stopButton.hidden = !(['working', 'waiting', 'needs'].includes(session.status) && (session.capabilities || []).includes('stop'))
+  composerInput.disabled = Boolean(session.user_input_questions?.length) || !(session.capabilities || []).includes('reply') && !hasInput
+  markReadButton.hidden = !(session.capabilities || []).includes('mark_read') || !Number(session.activity_at || 0) || !hasNews(session)
+  stopButton.hidden = !(['working', 'waiting', 'starting', 'needs'].includes(session.status) && (session.capabilities || []).includes('stop'))
   const done = doneAction(session)
   doneButton.hidden = !done
   if (done) {
@@ -647,12 +662,16 @@ function renderDetail({ preserveScroll = false } = {}) {
   const changed = lastDetailId !== session.id
   lastDetailId = session.id
   const grew = conversationEl.scrollHeight !== lastScrollHeight
-  requestAnimationFrame(() => {
+  cancelAnimationFrame(scrollFrame)
+  scrollFrame = requestAnimationFrame(() => {
+    if (selectedId !== session.id) return
     if (changed || !preserveScroll || nearBottom) {
       conversationEl.scrollTop = conversationEl.scrollHeight
       jumpLatest.hidden = true
     } else {
-      conversationEl.scrollTop = previousScroll
+      conversationEl.scrollTop = anchor?.isConnected
+        ? previousScroll + anchor.getBoundingClientRect().top - conversationEl.getBoundingClientRect().top - anchorOffset
+        : previousScroll
       // Reading back through a reply while the agent keeps writing: say so,
       // but leave the scroll where the reader put it.
       if (grew) jumpLatest.hidden = false
@@ -690,6 +709,7 @@ function rowMenuItems(session) {
 }
 
 async function menuAction(session, kind) {
+  if (busy || !providerAvailable(session.provider)) { setStatus('Reconnect before using session actions.', true); return }
   const next = kind === 'archive' && session.id === selectedId ? neighbourOf(session.id) : null
   if (kind === 'stop') queue.hold(session)
   const result = await safeAction({ kind, provider: session.provider, host: session.host || 'local', session_id: session.id,
@@ -812,17 +832,24 @@ function renderAll() {
   renderBadge()
   renderRows()
   renderDetail({ preserveScroll: true })
+  updateControls()
 }
 
 function selectSession(id, focusComposer = false) {
   saveDraft()
   composerInput.value = drafts.get(id) || ''
+  if (selectedId !== id) setActionStatus('')
   selectedId = id
   selectedCache = (board.sessions || []).find(session => session.id === id) || null
   renderRows()
   renderDetail()
-  if (focusComposer) composerInput.focus()
+  if (focusComposer) {
+    if (sessionHasQuestions()) questionsEl.querySelector('textarea')?.focus()
+    else composerInput.focus()
+  }
 }
+
+function sessionHasQuestions() { return Boolean(selectedSession()?.user_input_questions?.length) }
 
 function setStatus(text, error = false) {
   boardStatus.textContent = text
@@ -835,29 +862,46 @@ function setStatus(text, error = false) {
 }
 
 function setActionStatus(text, error = false) {
+  clearTimeout(actionStatusTimer)
   actionStatus.textContent = text
   actionStatus.style.color = error ? 'var(--error)' : 'var(--gold)'
-  if (!text) return
-  setTimeout(() => {
+  if (!text || error) return
+  actionStatusTimer = setTimeout(() => {
     if (actionStatus.textContent === text) actionStatus.textContent = ''
   }, 4500)
 }
 
+function providerAvailable(provider) {
+  return connected && (!board.providers?.[provider] || board.providers[provider] === 'ok')
+}
+
+function updateControls() {
+  const session = selectedSession()
+  const unavailable = !session || !providerAvailable(session.provider)
+  for (const button of [approveButton, declineButton, answerButton, markReadButton, doneButton, stopButton]) {
+    button.disabled = busy || unavailable
+  }
+  sendButton.disabled = busy || !session || composerInput.disabled || !composerInput.value.trim() || Boolean(session.user_input_request_id && unavailable)
+  sendNowButton.disabled = busy || unavailable || composerInput.disabled || Boolean(session?.approval_request_id || session?.user_input_request_id) ||
+    (!composerInput.value.trim() && !queue.list(session).some(item => ['queued', 'held'].includes(item.state)))
+  newSessionStart.disabled = startingSession || addingProject || !providerAvailable('t3')
+  addProjectButton.disabled = startingSession || addingProject || !providerAvailable('t3')
+  const notice = document.getElementById('connection-notice')
+  notice.hidden = !unavailable
+  notice.textContent = !connected ? 'Reconnecting to the bridge. Drafts and queued messages are kept.'
+    : session ? `${providerLabel(session)} is unavailable. Showing its last update.` : ''
+}
+
 function setBusy(next) {
   busy = next
-  sendButton.disabled = next
-  approveButton.disabled = next
-  declineButton.disabled = next
-  answerButton.disabled = next
-  markReadButton.disabled = next
-  doneButton.disabled = next
-  stopButton.disabled = next
+  if (selectedSession()) renderQueue(selectedSession())
+  else updateControls()
 }
 
 async function runAction(action, { pendingText = '' } = {}) {
   const session = selectedSession()
   if (!session || busy) return { ok: false, error: 'no session selected' }
-  if (!connected) { setActionStatus('Bridge offline. Try again after reconnecting.', true); return { ok: false } }
+  if (!providerAvailable(session.provider)) { setActionStatus('Provider offline. Try again after reconnecting.', true); return { ok: false } }
   setBusy(true)
 
   if (pendingText) {
@@ -895,6 +939,7 @@ async function sendComposer(immediate = false) {
   const session = selectedSession()
   const text = composerInput.value.trim()
   if (!session || busy || composerInput.disabled) return
+  if (immediate && !providerAvailable(session.provider)) { setActionStatus('Reconnect before sending now. Your draft is kept.', true); return }
   if (!text) {
     const item = queue.list(session).find(item => ['queued', 'held'].includes(item.state))
     if (immediate && connected && item) await queue.sendNow(item.id, session)
@@ -906,6 +951,8 @@ async function sendComposer(immediate = false) {
       const item = queue.enqueue(session, text)
       composerInput.value = ''
       saveDraft()
+      fitComposer()
+      updateControls()
       if (immediate && connected) await queue.sendNow(item.id, session)
       else await queue.update(board, connected)
     } catch (error) { setActionStatus(error.message, true) }
@@ -966,6 +1013,8 @@ function renderQuestions(session) {
       button.type = 'button'
       button.className = 'button quiet'
       button.textContent = option.label || option
+      button.dataset.questionId = question.id
+      button.setAttribute('aria-pressed', 'false')
       button.addEventListener('click', () => {
         const value = option.label || option
         if (question.multi_select || question.isMultiple) {
@@ -973,7 +1022,12 @@ function renderQuestions(session) {
           if (selected.has(value)) selected.delete(value); else selected.add(value)
           input.value = [...selected].join(', ')
           button.setAttribute('aria-pressed', String(selected.has(value)))
-        } else input.value = value
+        } else {
+          input.value = value
+          for (const peer of questionsEl.querySelectorAll('button')) {
+            if (peer.dataset.questionId === question.id) peer.setAttribute('aria-pressed', String(peer === button))
+          }
+        }
       })
       questionsEl.append(button)
     }
@@ -999,7 +1053,7 @@ function renderProjectOptions() {
   for (const project of provisionalProjects.values()) {
     if (!projects.some(item => item.id === project.id)) projects.push(project)
   }
-  if (!selectedProjectId && projects.length) {
+  if (!projects.some(project => project.id === selectedProjectId)) {
     selectedProjectId = projects[0]?.id || null
   }
   projectMenu.replaceChildren()
@@ -1015,6 +1069,7 @@ function renderProjectOptions() {
       projectMenu.hidden = true
       projectTrigger.setAttribute('aria-expanded', 'false')
       renderProjectOptions()
+      projectTrigger.focus()
     })
     projectMenu.append(option)
   }
@@ -1030,8 +1085,10 @@ function renderProjectOptions() {
 }
 
 function openNewSession() {
+  modalReturnFocus = document.activeElement
   const projects = board.projects || []
   renderProjectOptions()
+  updateControls()
   newSessionStatus.textContent = ''
   newSessionPrompt.value = ''
   newSessionModal.hidden = false
@@ -1043,9 +1100,11 @@ function closeNewSession() {
   projectMenu.hidden = true
   projectTrigger.setAttribute('aria-expanded', 'false')
   newSessionModal.hidden = true
+  modalReturnFocus?.focus()
 }
 
 async function startNewSession() {
+  if (startingSession || addingProject || !providerAvailable('t3')) return
   const projectId = selectedProjectId
   const text = newSessionPrompt.value.trim()
   if (!projectId || !text) {
@@ -1053,10 +1112,10 @@ async function startNewSession() {
     return
   }
 
-  newSessionStart.disabled = true
+  startingSession = true
+  updateControls()
+  saveDraft()
   newSessionStatus.textContent = 'Starting...'
-  const previousId = selectedId
-  selectedId = null
   const result = await safeAction({
     kind: 'new',
     provider: 't3',
@@ -1064,27 +1123,30 @@ async function startNewSession() {
     session_id: projectId,
     text
   })
-  newSessionStart.disabled = false
+  startingSession = false
+  updateControls()
 
   if (!result.ok) {
-    selectedId = previousId
     newSessionStatus.textContent = result.error || result.message || 'Could not start the session.'
     return
   }
 
   if (result.thread_id) { selectedId = result.thread_id; selectedCache = null; composerInput.value = '' }
+  renderAll()
   closeNewSession()
   setStatus('New session started. It will appear as soon as T3 publishes it.')
 }
 
 async function addProject() {
+  if (addingProject || startingSession || !providerAvailable('t3')) return
   let chosen
   try { chosen = await window.wow.chooseDirectory() }
   catch (error) { newSessionStatus.textContent = error.message; return }
   if (!chosen?.ok) return
   const workspaceRoot = chosen.path
   const title = workspaceRoot.replaceAll('\\', '/').split('/').filter(Boolean).pop() || 'Project'
-  addProjectButton.disabled = true
+  addingProject = true
+  updateControls()
   newSessionStatus.textContent = `Adding ${title}...`
   const result = await safeAction({
     kind: 'new_project',
@@ -1093,7 +1155,8 @@ async function addProject() {
     workspace_root: workspaceRoot,
     title
   })
-  addProjectButton.disabled = false
+  addingProject = false
+  updateControls()
   if (!result.ok) {
     newSessionStatus.textContent = result.error || result.message || 'Could not add the project.'
     return
@@ -1113,12 +1176,14 @@ function moveSelection(delta) {
   const current = Math.max(0, sessions.findIndex(session => session.id === selectedId))
   const next = Math.min(sessions.length - 1, Math.max(0, current + delta))
   selectSession(sessions[next].id)
+  const row = rowsEl.querySelector(`[data-id="${CSS.escape(sessions[next].id)}"]`)
+  row?.focus({ preventScroll: true })
+  row?.scrollIntoView({ block: 'nearest' })
 }
 
 searchInput.addEventListener('input', () => {
   search = searchInput.value.trim().toLowerCase()
   renderRows()
-  renderDetail()
 })
 
 sendButton.addEventListener('click', () => void sendComposer())
@@ -1156,6 +1221,9 @@ stopButton.addEventListener('click', async () => {
 })
 
 document.getElementById('board-close').addEventListener('click', () => window.wow.command('badge'))
+badge.addEventListener('keydown', event => {
+  if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); window.wow.command('board') }
+})
 badge.addEventListener('click', event => {
   event.stopPropagation()
   window.wow.command('board')
@@ -1164,6 +1232,20 @@ document.getElementById('refresh-button').addEventListener('click', () => window
 document.getElementById('new-session-button').addEventListener('click', openNewSession)
 document.getElementById('new-session-close').addEventListener('click', closeNewSession)
 newSessionStart.addEventListener('click', () => void startNewSession())
+projectDropdown.addEventListener('keydown', event => {
+  const options = [...projectMenu.querySelectorAll('button')]
+  if (event.key === 'Escape' && !projectMenu.hidden) {
+    event.preventDefault(); event.stopPropagation()
+    projectMenu.hidden = true; projectTrigger.setAttribute('aria-expanded', 'false'); projectTrigger.focus()
+  } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) && options.length) {
+    event.preventDefault()
+    projectMenu.hidden = false; projectTrigger.setAttribute('aria-expanded', 'true')
+    const current = options.indexOf(document.activeElement)
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
+      : (current + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length
+    options[next].focus()
+  }
+})
 projectTrigger.addEventListener('click', () => {
   const opening = projectMenu.hidden
   projectMenu.hidden = !opening
@@ -1182,6 +1264,14 @@ document.addEventListener('keydown', event => {
   const writing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement
 
   if (!newSessionModal.hidden) {
+    if (event.key === 'Tab') {
+      const focusable = [...newSessionModal.querySelectorAll('button, textarea')].filter(el => !el.disabled && el.getClientRects().length)
+      const index = focusable.indexOf(document.activeElement)
+      if (event.shiftKey && index <= 0 || !event.shiftKey && index === focusable.length - 1) {
+        event.preventDefault()
+        focusable[event.shiftKey ? focusable.length - 1 : 0]?.focus()
+      }
+    }
     if (event.key === 'Escape') {
       event.preventDefault()
       closeNewSession()
@@ -1200,13 +1290,13 @@ document.addEventListener('keydown', event => {
     return
   }
 
-  if (event.key === '/' && !writing) {
+  if (event.key === '/' && !writing && !event.ctrlKey && !event.metaKey && !event.altKey) {
     event.preventDefault()
     searchInput.focus()
     searchInput.select()
     return
   }
-  if (event.key.toLowerCase() === 'n' && !writing) {
+  if (event.key.toLowerCase() === 'n' && !writing && !event.ctrlKey && !event.metaKey && !event.altKey) {
     event.preventDefault()
     openNewSession()
     return
@@ -1237,8 +1327,8 @@ window.wow.onRoster(data => {
   const liveSelected = (board.sessions || []).find(session => session.id === selectedId)
   if (liveSelected) selectedCache = liveSelected
   if (!selectedId && (board.sessions || []).length) {
-    selectedId = board.sessions[0].id
-    selectedCache = board.sessions[0]
+    selectedCache = visibleSessions()[0] || board.sessions[0]
+    selectedId = selectedCache.id
     composerInput.value = drafts.get(selectedId) || ''
   }
   renderAll()
@@ -1255,7 +1345,8 @@ window.wow.onLive(state => {
     boardStatus.textContent = offline.length ? `${offline.join(', ')} unavailable. Queued messages are kept.` : 'Live connection established.'
   }
   renderBadge()
-  if (selectedSession()) renderQueue(selectedSession())
+  if (selectedSession()) renderDetail({ preserveScroll: true })
+  updateControls()
   void queue.update(board, connected)
 })
 
@@ -1314,7 +1405,10 @@ window.wow.onMode(({ mode: next }) => {
   if (next === 'board') {
     renderDetail()
     scheduleAutoRead(selectedSession())
-    if (newSessionModal.hidden) composerInput.focus()
+    if (newSessionModal.hidden) {
+      if (sessionHasQuestions()) questionsEl.querySelector('textarea')?.focus()
+      else composerInput.focus()
+    }
   } else {
     clearTimeout(autoReadTimer)
     reportedBadgeWidth = 0

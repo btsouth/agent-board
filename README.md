@@ -42,7 +42,7 @@ The bridge is tested on Linux. Windows and macOS bridge hosts are not verified.
 For a managed installation:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.5/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.6/install.sh | bash
 ```
 
 The installer downloads the tagged release under
@@ -242,6 +242,6 @@ measure Blizzard's font renderer.
 
 ## Status
 
-Version `0.2.5` is a preview. The bridge and addon are tested together, but the
+Version `0.2.6` is a preview. The bridge and addon are tested together, but the
 in-game layout and provider-specific approval/input flows should be exercised in
 the target client after installation.

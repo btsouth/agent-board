@@ -10,7 +10,7 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body class="mode-badge">
-    <div id="badge" role="button" aria-label="Open Agent Board" title="Agent Board · Super+Alt+C">
+    <div id="badge" role="button" tabindex="0" aria-label="Open Agent Board" title="Agent Board · Super+Alt+C">
       <span class="badge-grip" title="Drag to move"></span>
       <span class="badge-dot"></span>
       <span class="badge-text">Connecting…</span>
@@ -37,7 +37,7 @@
       <main class="workspace">
         <aside class="sidebar">
           <div class="search-wrap">
-            <input id="search-input" type="search" placeholder="Search sessions" spellcheck="false" />
+            <input id="search-input" aria-label="Search sessions" type="search" placeholder="Search sessions" spellcheck="false" />
             <kbd>/</kbd>
           </div>
 
@@ -68,10 +68,11 @@
               <div id="detail-status" class="status-pill"></div>
             </div>
 
+            <div id="connection-notice" class="connection-notice" role="status" hidden></div>
             <div id="attention" class="attention" hidden></div>
             <div id="questions" class="questions" hidden></div>
             <div class="conversation-wrap">
-              <div id="conversation" class="conversation" aria-live="polite"></div>
+              <div id="conversation" class="conversation" role="region" aria-label="Conversation" tabindex="0"></div>
               <button id="jump-latest" class="jump-latest" type="button" hidden>Jump to latest</button>
             </div>
 
@@ -84,11 +85,11 @@
               <button id="mark-read-button" class="button quiet" type="button">Mark read</button>
               <button id="done-button" class="button quiet" type="button" hidden></button>
               <button id="stop-button" class="button danger" type="button" hidden>Stop turn</button>
-              <span id="action-status" class="action-status"></span>
+              <span id="action-status" class="action-status" role="status"></span>
             </div>
 
             <div class="composer-wrap">
-              <textarea id="composer-input" rows="2" placeholder="Reply to this session"></textarea>
+              <textarea id="composer-input" aria-label="Message this session" rows="2" placeholder="Reply to this session"></textarea>
               <div class="composer-actions">
                 <span><kbd>Enter</kbd> send, or queue while it works · <kbd>Ctrl+Enter</kbd> send now · <kbd>Shift+Enter</kbd> new line</span>
                 <button id="send-now-button" class="button quiet" type="button" hidden>Send now</button>
@@ -108,9 +109,9 @@
             </div>
             <button id="new-session-close" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
           </div>
-          <label>Project</label>
+          <label id="project-label">Project</label>
           <div id="project-dropdown" class="dropdown">
-            <button id="project-trigger" class="dropdown-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+            <button id="project-trigger" class="dropdown-trigger" type="button" aria-labelledby="project-label project-trigger-label" aria-controls="project-menu" aria-haspopup="listbox" aria-expanded="false">
               <span id="project-trigger-label">Choose a project</span>
               <span class="dropdown-chevron">⌄</span>
             </button>
@@ -121,7 +122,7 @@
           <label for="new-session-prompt">Prompt</label>
           <textarea id="new-session-prompt" rows="6" placeholder="What should the agent do?"></textarea>
           <div class="modal-actions">
-            <span id="new-session-status"></span>
+            <span id="new-session-status" role="status"></span>
             <button id="new-session-start" class="button accent" type="button">Start session</button>
           </div>
         </section>

@@ -5,6 +5,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 addon and the bridge version independently and the payload is versioned by
 `schema`.
 
+## [0.2.6] - 2026-09-26
+
+### Fixed
+
+- Streaming preserves completed Markdown blocks, code scroll and copy focus.
+- Transcript updates preserve the reading position as older messages leave the
+  window. Tool steps, unread labels and session groups refresh correctly.
+- Offline controls keep drafts and queued messages visible. Repeated keyboard
+  submissions cannot start duplicate sessions.
+
+### Changed
+
+- Improved compact layouts, question forms and light-theme contrast.
+- Added keyboard project selection, modal focus handling, accessible copy
+  controls and reduced-motion support.
+
 ## [0.2.5] - 2026-09-26
 
 ### Changed

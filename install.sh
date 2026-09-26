@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pin the bootstrap to the release whose setup contract this script knows.
 set -euo pipefail
-VERSION=v0.2.5
+VERSION=v0.2.6
 REPOSITORY=https://github.com/btsouth/agent-board.git
 
 fail() { printf 'AgentBoard setup: %s\n' "$*" >&2; exit 1; }

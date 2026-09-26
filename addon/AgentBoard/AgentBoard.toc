@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Agent Board
 ## Author: btsouth
-## Version: 0.2.5
+## Version: 0.2.6
 ## Notes: Hermes and T3 Code agents in one board. Requires the Agent Board bridge.
 ## IconTexture: Interface\AddOns\AgentBoard\icon
 ## SavedVariables: AgentBoardOutbox, AgentBoardDB, AgentBoardLastGood, AgentBoardLastGoodAt, AgentBoardSync
