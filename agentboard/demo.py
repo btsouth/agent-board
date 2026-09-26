@@ -107,9 +107,14 @@ def _iso(epoch: float) -> str:
 
 
 class DemoWorld:
-    def __init__(self, *, speed: float = 1.0, lead: float = 0.0, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, *, speed: float = 1.0, lead: float = 0.0, brisk: bool = False,
+                 clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
         self._speed = max(0.1, float(speed))
+        # Brisk is the autoplay pace: tool steps closer together and replies
+        # streaming twice as fast, so a whole story fits in about half a minute.
+        self._pace = 0.45 if brisk else 1.0
+        self._rate = STREAM_RATE * (2.0 if brisk else 1.0)
         # Seconds before the scripted agents start: autoplay uses it to open the
         # board first, so the recording catches the first tool step.
         self._lead = max(0.0, float(lead))
@@ -216,6 +221,7 @@ class DemoWorld:
         session["turn"] = session.get("turn", 0) + 1
         turn = session["turn"]
         activities = activities or ["Working"]
+        session["activity"] = activities[0]
 
         def still(fn: Callable[[], None]) -> Callable[[], None]:
             # A stop or a new turn cancels whatever this one still had queued.
@@ -229,8 +235,9 @@ class DemoWorld:
                 session["activity_at"] = self._now()
             self._at(start + index * gap, still(add_step))
 
-        streaming_at = start + len(steps) * gap + 0.8
-        duration = len(reply) / STREAM_RATE
+        start, gap = start * self._pace, gap * self._pace
+        streaming_at = start + len(steps) * gap + 0.8 * self._pace
+        duration = len(reply) / self._rate
 
         def begin_stream() -> None:
             session["activity"] = activities[-1]
@@ -254,7 +261,7 @@ class DemoWorld:
         stream = session.get("stream")
         if not stream:
             return ""
-        shown = int((self._now() - stream["start"]) * STREAM_RATE * self._speed)
+        shown = int((self._now() - stream["start"]) * self._rate * self._speed)
         text = stream["text"][: max(0, shown)]
         # End on a word, the way tokens arrive, not in the middle of one.
         cut = text.rfind(" ")
@@ -401,14 +408,14 @@ def stop() -> int:
 # are at speed 1; the overlay does the clicking and typing itself, through the
 # same buttons and composer a person would use.
 AUTOPLAY = [
-    (2.5, "focus:demo-uploader"),
-    (30.0, "focus:demo-billing"),
-    (2.5, "demo:click:approve-button"),
-    (13.0, "focus:demo-uploader"),
-    (2.0, "demo:type:open the PR and ask Sam to review it"),
-    (12.0, "badge"),
+    (1.2, "focus:demo-uploader"),
+    (13.8, "focus:demo-billing"),
+    (1.4, "demo:click:approve-button"),
+    (6.6, "focus:demo-uploader"),
+    (1.0, "demo:type:open the PR and ask Sam to review it"),
+    (9.0, "badge"),
 ]
-AUTOPLAY_LEAD = 3.0
+AUTOPLAY_LEAD = 1.2
 
 
 def _autoplay(speed: float, stopping: threading.Event) -> None:
@@ -424,7 +431,7 @@ def _autoplay(speed: float, stopping: threading.Event) -> None:
 
 
 def run(*, speed: float = 1.0, autoplay: bool = False) -> int:
-    world = DemoWorld(speed=speed, lead=AUTOPLAY_LEAD if autoplay else 0.0)
+    world = DemoWorld(speed=speed, lead=AUTOPLAY_LEAD if autoplay else 0.0, brisk=autoplay)
     path = socket_path()
     hub = live.LiveBridge(snapshot=world.snapshot, action=world.action, interval=0.1, path=path)
     hub.start()

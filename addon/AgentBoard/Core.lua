@@ -9,7 +9,7 @@
 local addonName, ns = ...
 
 ns.ADDON = addonName
-ns.VERSION = "0.2.4"
+ns.VERSION = "0.2.5"
 
 local L = ns.L
 

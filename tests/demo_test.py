@@ -70,6 +70,18 @@ class DemoWorldTest(unittest.TestCase):
         self.advance(15)
         self.assertEqual(rows(self.world)["demo-cdn"]["status"], "reply")
 
+    def test_the_autoplay_story_fits_its_script(self):
+        world = demo.DemoWorld(clock=self.clock, lead=demo.AUTOPLAY_LEAD, brisk=True)
+        self.world = world
+        self.advance(sum(delay for delay, _ in demo.AUTOPLAY[:2]))  # when autoplay moves to billing
+        self.assertEqual(rows(world)["demo-uploader"]["status"], "reply")
+        world.action({"kind": "approve", "session_id": "demo-billing", "text": "demo-approval-1"})
+        self.advance(demo.AUTOPLAY[3][0])  # until it moves back to reply
+        self.assertEqual(rows(world)["demo-billing"]["status"], "reply")
+        world.action({"kind": "reply", "session_id": "demo-uploader", "text": "open the PR and ask Sam to review it"})
+        self.advance(demo.AUTOPLAY[5][0] - 3)  # typing takes about three seconds of the last gap
+        self.assertIn("#482", rows(world)["demo-uploader"]["conversation"][-1]["text"])
+
     def test_replies_answer_what_you_asked(self):
         self.world.action({"kind": "reply", "session_id": "demo-notes", "text": "Open the PR and ask Sam to review it"})
         self.advance(20)

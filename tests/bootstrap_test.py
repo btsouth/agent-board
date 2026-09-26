@@ -28,7 +28,7 @@ import os,sys,json
 args=sys.argv[1:]
 if args[0] == 'clone':
     if os.environ.get('FAIL_DOWNLOAD'): sys.exit(7)
-    assert args[:6] == ['clone','--quiet','--depth','1','--branch','v0.2.4'],args
+    assert args[:6] == ['clone','--quiet','--depth','1','--branch','v0.2.5'],args
     assert args[6] == 'https://github.com/btsouth/agent-board.git',args
     target=Path(args[-1]); (target/'.git').mkdir(parents=True); (target/'bin').mkdir()
     launcher=target/'bin/agent-board'

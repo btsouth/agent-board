@@ -39,7 +39,7 @@ def check(label: str, condition: bool, detail: str = "") -> None:
         failures.append(label)
 
 
-HEADER = "HE1|bridge=0.2.4|schema=5|generated=1789771234|rows={rows}|acked=0|hosts=local:ok|new="
+HEADER = "HE1|bridge=0.2.5|schema=5|generated=1789771234|rows={rows}|acked=0|hosts=local:ok|new="
 GOOD_ROW = "20260918_182123_e733d6|needs|30|local|default|Projects|a title||12|0.4200|0|a preview"
 
 
