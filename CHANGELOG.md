@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 addon and the bridge version independently and the payload is versioned by
 `schema`.
 
+## [0.2.1] - 2026-09-26
+
+### Added
+
+- Right-click a session (or press the Menu key or Shift+F10 on it) for Open,
+  Mark read or Mark unread, Settle or Archive, Stop turn, Copy title and Copy
+  session ID. T3 Code threads also offer Archive in T3 Code, which asks for a
+  second click.
+- Mark unread for T3 Code threads and Hermes sessions. A T3 thread you mark
+  unread stays unread until you read it again, even if it is settled.
+
 ## [0.2.0] - 2026-09-26
 
 ### Added

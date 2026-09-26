@@ -291,6 +291,11 @@ function renderRows() {
     row.tabIndex = 0
     row.addEventListener('keydown', event => {
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSession(session.id, true) }
+      if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
+        event.preventDefault()
+        const box = row.getBoundingClientRect()
+        openRowMenu(session.id, box.left + 24, box.bottom - 6)
+      }
     })
     row.className = `row ${group}${session.id === selectedId ? ' selected' : ''}`
     row.setAttribute('role', 'option')
@@ -342,6 +347,10 @@ function renderRows() {
 
     row.append(dot, main, rowAge)
     row.addEventListener('click', () => selectSession(session.id, true))
+    row.addEventListener('contextmenu', event => {
+      event.preventDefault()
+      openRowMenu(session.id, event.clientX, event.clientY)
+    })
     rowsEl.append(row)
   }
   rowsEl.scrollTop = scroll
@@ -640,6 +649,117 @@ function renderDetail({ preserveScroll = false } = {}) {
 }
 
 const doneButton = document.getElementById('done-button')
+const rowMenu = document.getElementById('row-menu')
+
+// Everything you can do to a session without opening it. Items only appear
+// when the provider supports them, and a run of them is split by separators.
+function rowMenuItems(session) {
+  const can = kind => (session.capabilities || []).includes(kind)
+  const act = kind => () => void menuAction(session, kind)
+  const running = ['working', 'waiting', 'starting'].includes(session.status)
+  const unread = sessionGroup(session) === 'unread' || (session.status === 'error' && sessionGroup(session) === 'needs')
+  const done = doneAction(session)
+  const items = [{ label: 'Open', run: () => selectSession(session.id, true) }, 'separator']
+  if (unread && can('mark_read')) items.push({ label: 'Mark read', run: act('mark_read') })
+  else if (!running && can('mark_unread')) items.push({ label: 'Mark unread', run: act('mark_unread') })
+  // E acts on the open session, so the hint only belongs to that one.
+  if (done) items.push({ label: done.label, hint: session.id === selectedId ? 'E' : '', run: act(done.kind) })
+  if (running && can('stop')) items.push({ label: 'Stop turn', danger: true, run: act('stop') })
+  items.push('separator')
+  items.push({ label: 'Copy title', run: () => void copyText(session.title || '') })
+  items.push({ label: 'Copy session ID', run: () => void copyText(session.id) })
+  if (session.provider === 't3' && can('archive') && !running) {
+    items.push('separator')
+    // Archived threads leave the board, so this one asks twice.
+    items.push({ label: 'Archive in T3 Code', confirm: 'Click again to archive', danger: true, run: act('archive') })
+  }
+  return items.filter((item, index, all) => item !== 'separator' || (index > 0 && all[index - 1] !== 'separator' && index < all.length - 1))
+}
+
+async function menuAction(session, kind) {
+  const next = kind === 'archive' && session.id === selectedId ? neighbourOf(session.id) : null
+  if (kind === 'stop') queue.hold(session)
+  const result = await safeAction({ kind, provider: session.provider, host: session.host || 'local', session_id: session.id,
+    text: kind === 'mark_read' ? String(session.activity_at || '') : '' })
+  const labels = { mark_read: 'Marked read.', mark_unread: 'Marked unread.', settle: 'Settled in T3 Code.', unsettle: 'Back in T3 Code\'s active list.',
+    archive: session.provider === 't3' ? 'Archived in T3 Code.' : 'Archived.', stop: 'Stopping.' }
+  if (result.ok) {
+    setStatus(labels[kind] || 'Done.')
+    if (next) selectSession(next)
+    window.wow.command('refresh')
+  } else setStatus(result.error || result.message || 'That did not work.', true)
+}
+
+let menuReturnFocus = null
+
+function openRowMenu(id, x, y) {
+  const session = (board.sessions || []).find(item => item.id === id)
+  if (!session) return
+  menuReturnFocus = document.activeElement
+  rowMenu.replaceChildren()
+  for (const item of rowMenuItems(session)) {
+    if (item === 'separator') {
+      const line = document.createElement('div')
+      line.className = 'row-menu-separator'
+      line.setAttribute('role', 'separator')
+      rowMenu.append(line)
+      continue
+    }
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = `row-menu-item${item.danger ? ' danger' : ''}`
+    button.setAttribute('role', 'menuitem')
+    const label = document.createElement('span')
+    label.textContent = item.label
+    button.append(label)
+    if (item.hint) {
+      const hint = document.createElement('kbd')
+      hint.textContent = item.hint
+      button.append(hint)
+    }
+    button.addEventListener('click', () => {
+      if (item.confirm && !button.dataset.armed) {
+        button.dataset.armed = '1'
+        label.textContent = item.confirm
+        return
+      }
+      closeRowMenu()
+      item.run()
+    })
+    rowMenu.append(button)
+  }
+  rowMenu.hidden = false
+  // Keep the whole menu inside the window, flipping up or left near an edge.
+  const { width, height } = rowMenu.getBoundingClientRect()
+  rowMenu.style.left = `${Math.max(6, Math.min(x, window.innerWidth - width - 6))}px`
+  rowMenu.style.top = `${Math.max(6, y + height > window.innerHeight - 6 ? y - height : y)}px`
+  rowMenu.querySelector('.row-menu-item')?.focus()
+}
+
+function closeRowMenu() {
+  if (rowMenu.hidden) return
+  rowMenu.hidden = true
+  if (menuReturnFocus?.isConnected) menuReturnFocus.focus()
+  menuReturnFocus = null
+}
+
+rowMenu.addEventListener('keydown', event => {
+  const items = [...rowMenu.querySelectorAll('.row-menu-item')]
+  const index = items.indexOf(document.activeElement)
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault()
+    event.stopPropagation()
+    const step = event.key === 'ArrowDown' ? 1 : -1
+    items[(index + step + items.length) % items.length]?.focus()
+  } else if (event.key === 'Escape' || event.key === 'Tab') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeRowMenu()
+  }
+})
+document.addEventListener('mousedown', event => { if (!rowMenu.contains(event.target)) closeRowMenu() }, true)
+window.addEventListener('blur', closeRowMenu)
+rowsEl.addEventListener('scroll', closeRowMenu)
 
 // "Done with this": settle in T3 (it stays in history), archive in Hermes
 // (it leaves the list). Not offered while the agent is still working.
@@ -1058,6 +1178,7 @@ document.addEventListener('keydown', event => {
     return
   }
 
+  if (!rowMenu.hidden) return
   if (event.key === 'Escape') {
     saveDraft()
     window.wow.command('badge')

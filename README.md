@@ -42,7 +42,7 @@ The bridge is tested on Linux. Windows and macOS bridge hosts are not verified.
 For a managed installation:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.1/install.sh | bash
 ```
 
 The installer downloads the tagged release under
@@ -88,7 +88,9 @@ automatic loading-screen sync and send-on-sync are disabled by default.
 Sessions are grouped under **Needs you**, **Running**, **New replies** and
 **Seen**. Replies render Markdown and tool calls show as expandable steps between
 messages. Keys on the board: `/` search, `j`/`k` move, `N` new session, `E`
-settle (T3 Code) or archive (Hermes), `Esc` back to the badge. In the composer,
+settle (T3 Code) or archive (Hermes), `Esc` back to the badge. Right-click a
+session for the rest: mark read or unread, settle or archive, stop, and copy its
+title or ID. In the composer,
 `Enter` sends (or queues while the agent works), `Ctrl+Enter` sends right away
 and `Shift+Enter` adds a line.
 
@@ -225,6 +227,6 @@ measure Blizzard's font renderer.
 
 ## Status
 
-Version `0.2.0` is a preview. The bridge and addon are tested together, but the
+Version `0.2.1` is a preview. The bridge and addon are tested together, but the
 in-game layout and provider-specific approval/input flows should be exercised in
 the target client after installation.

@@ -43,7 +43,7 @@ FIELD_SEP = "|"
 # who typed that sentence got a clipboard instead of a reply.
 OUTBOX_KINDS = {"reply", "new", "approve", "decline", "answer", "focus", "mark_read", "stop"}
 # The overlay can also settle (T3) and archive (Hermes, T3); the addon cannot.
-LIVE_KINDS = OUTBOX_KINDS | {"new_project", "settle", "unsettle", "archive"}
+LIVE_KINDS = OUTBOX_KINDS | {"new_project", "settle", "unsettle", "archive", "mark_unread"}
 
 # What a session id looks like in the store: date_time_hex, or any uuid-shaped
 # string. Used to tell a real entry from the debris of a torn one.
@@ -53,7 +53,7 @@ SESSION_ID_RE = re.compile(r"[A-Za-z0-9_.-]{8,}")
 # know, so both sides can be updated independently without silent nonsense.
 PAYLOAD_TAG = "HE1"
 PAYLOAD_SCHEMA = 5
-BRIDGE_VERSION = "0.2.0"
+BRIDGE_VERSION = "0.2.1"
 
 _INSTALL_HINTS = (
     "/mnt/data/Games/World of Warcraft",
@@ -1146,6 +1146,16 @@ def dispatch_live(action: dict[str, Any], *, state: dict[str, Any], channel: str
         result = hermes_store.set_flags(session_id, archived=True)
         return {"ok": bool(result.get("ok")), "message": "Archived" if result.get("ok") else result.get("error", "archive failed"),
                 "error": "" if result.get("ok") else result.get("error", "archive failed")}
+    if provider == "hermes" and kind == "mark_unread":
+        if host != "local":
+            return {"ok": False, "message": "mark unread is available only for local Hermes sessions"}
+        result = hermes_store.set_flags(session_id, read=False)
+        if not result.get("ok"):
+            return {"ok": False, "message": result.get("error", "mark unread failed"), "error": result.get("error", "mark unread failed")}
+        # Drop the bridge's own read marker too, or it would keep the row read.
+        if (state.get("read_marks") or {}).pop(_read_key(host, session_id), None) is not None:
+            _save_state(state)
+        return {"ok": True, "message": "Marked unread"}
     if provider == "hermes" and host == "local" and kind == "mark_read":
         # Hermes's own read marker, so the desktop app agrees; the bridge's
         # marker below still applies if Hermes cannot be reached.

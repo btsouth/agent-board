@@ -346,6 +346,9 @@ class Bridge {
   constructor() {
     this.state = {
       seen: {},
+      // Threads you marked unread by hand: they stay unread, even when settled,
+      // until you read them again.
+      unread: {},
       lastStatus: {},
       seeded: false,
       ...readJson(STATE_PATH, {}),
@@ -632,7 +635,8 @@ class Bridge {
     const failed = session?.status === "error" || latestTurn?.state === "error";
     const replyMs = safeTime(latestAssistant?.created_at) || 0;
     const signalMs = failed ? Math.max(replyMs, updatedMs || 0) : replyMs;
-    const unread = Boolean(signalMs && signalMs > seenMs && latestTurn?.state !== "running");
+    const unread = Boolean(this.state.unread?.[thread.id]) ||
+      Boolean(signalMs && signalMs > seenMs && latestTurn?.state !== "running");
     const hasApproval = thread.hasPendingApprovals === true && Boolean(pendingApproval?.request_id);
     const hasUserInput = thread.hasPendingUserInput === true;
     let userInput = null;
@@ -773,7 +777,7 @@ class Bridge {
           user_input_options: item.userInputOptions,
           user_input_questions: item.userInputQuestions,
           conversation: item.conversation,
-          capabilities: ["reply", "new", "approve", "decline", "answer", "focus", "mark_read", "stop", "settle"],
+          capabilities: ["reply", "new", "approve", "decline", "answer", "focus", "mark_read", "mark_unread", "stop", "settle", "archive"],
         })),
       })}\n`,
     );
@@ -786,8 +790,15 @@ class Bridge {
     if (action.kind === "mark_read") {
       const stamp = Number(action.text) || Math.floor(Date.now() / 1000);
       this.state.seen[action.sessionId] = Math.max(stamp * 1000, Number(this.state.seen[action.sessionId] || 0));
+      if (this.state.unread) delete this.state.unread[action.sessionId];
       this.dirty = true;
       return { ok: true, message: `Marked ${action.sessionId} read.` };
+    }
+    if (action.kind === "mark_unread") {
+      this.state.unread ||= {};
+      this.state.unread[action.sessionId] = true;
+      this.dirty = true;
+      return { ok: true, message: `Marked ${action.sessionId} unread.` };
     }
     if (action.kind === "reply") {
       const thread = this.threads.get(action.sessionId);
@@ -820,6 +831,7 @@ class Bridge {
         threadId: action.sessionId,
         ...(action.kind === "unsettle" ? { reason: "user" } : {}),
       });
+      if (action.kind === "settle" && this.state.unread) delete this.state.unread[action.sessionId];
       this.dirty = true;
       const done = { settle: "Settled", unsettle: "Moved back to active", archive: "Archived" }[action.kind];
       return { ok: true, message: `${done} ${action.sessionId}.` };

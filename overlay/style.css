@@ -1108,3 +1108,36 @@ body.mode-badge { width: 100%; height: 100%; }
 .composer-actions > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer-actions .button { flex: none; white-space: nowrap; }
 .composer-actions .button + .button { margin-left: 0; }
+
+/* ---------------------------------------------------------- row menu */
+
+.row-menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 196px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--om-border) 45%, transparent);
+  border-radius: 8px;
+  background: var(--om-sidebar);
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--om-darker) 70%, transparent);
+  animation: menu-in 90ms ease-out;
+}
+.row-menu[hidden] { display: none; }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.row-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: 5px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-align: left;
+}
+.row-menu-item:hover, .row-menu-item:focus-visible { outline: none; color: var(--om-text); background: var(--hover); }
+.row-menu-item.danger { color: var(--error); }
+.row-menu-item.danger:hover, .row-menu-item.danger:focus-visible { background: color-mix(in srgb, var(--error) 12%, transparent); }
+.row-menu-item kbd { color: var(--ink-faint); font-size: 10px; }
+.row-menu-separator { height: 1px; margin: 4px 6px; background: var(--line); }

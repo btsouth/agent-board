@@ -55,6 +55,16 @@ class OverlayRegression(unittest.TestCase):
         self.assertTrue(result['ok'])
         flags.assert_called_once_with('20260101_000000_abcdef', archived=True)
 
+    def test_hermes_mark_unread_clears_the_bridge_marker_too(self):
+        key = wowclient._read_key('local', '20260101_000000_abcdef')
+        state = {'read_marks': {key: 100}}
+        with patch.object(wowclient.hermes_store, 'set_flags', return_value={'ok': True}) as flags, \
+             patch.object(wowclient, '_save_state'):
+            result = wowclient.dispatch_live({'kind': 'mark_unread', 'provider': 'hermes', 'session_id': '20260101_000000_abcdef'}, state=state)
+        self.assertTrue(result['ok'])
+        flags.assert_called_once_with('20260101_000000_abcdef', read=False)
+        self.assertNotIn(key, state['read_marks'])
+
     def test_hermes_cannot_be_settled(self):
         result = wowclient.dispatch_live({'kind': 'settle', 'provider': 'hermes', 'session_id': '20260101_000000_abcdef'}, state={})
         self.assertFalse(result['ok'])

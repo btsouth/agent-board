@@ -347,7 +347,7 @@ def _board_from(conn: sqlite3.Connection, *, limit: int, now: float, cutoff: flo
                     "preview": text.strip().replace("\n", " ")[:180],
                     "snippet": _snippet(text) if role == "assistant" else "",
                     "conversation": _conversation(conn, sid),
-                    "capabilities": ["reply", "focus", "mark_read", "stop", "archive"],
+                    "capabilities": ["reply", "focus", "mark_read", "mark_unread", "stop", "archive"],
                 }
             )
     finally:
