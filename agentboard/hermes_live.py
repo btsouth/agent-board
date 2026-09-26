@@ -8,7 +8,71 @@ import time
 from . import backend
 
 
-def enrich(data: dict, sessions: list[dict]) -> dict:
+NO_EVENTS = 9007199254740991  # a watermark past any event: open requests only
+STREAM_KEEP = 4  # finished provisional replies kept until the store has them
+
+
+class Stream:
+    """One working session's reply text, rebuilt from the backend's event replay.
+
+    The session store only receives assistant text after a tool round or at the
+    end of a turn, so while a turn runs the only way to show the reply growing is
+    the backend's per-token events. Reading the replay buffer never attaches to
+    the session, so the desktop app keeps sole ownership of it.
+    """
+
+    def __init__(self):
+        self.last_seen = 0
+        self.epoch = None
+        self.done: list[str] = []
+        self.current = ''
+
+    def apply(self, snapshot: dict) -> None:
+        epoch = snapshot.get('epoch')
+        if self.epoch is not None and epoch != self.epoch:
+            self.__init__()
+        self.epoch = epoch
+        for event in snapshot.get('events') or []:
+            kind = event.get('type')
+            payload = event.get('payload') or {}
+            if kind == 'message.start':
+                self._finish(self.current)
+            elif kind == 'message.delta':
+                self.current += str(payload.get('text') or '')
+            elif kind in {'message.interim', 'message.complete'}:
+                text = str(payload.get('text') or '')
+                already = kind == 'message.interim' and payload.get('already_streamed')
+                self._finish(self.current if already or not text else text)
+        try:
+            self.last_seen = max(self.last_seen, int(snapshot.get('latest_seq') or 0))
+        except (TypeError, ValueError):
+            pass
+
+    def _finish(self, text: str) -> None:
+        if text.strip():
+            self.done = [*self.done, text][-STREAM_KEEP:]
+        self.current = ''
+
+    def messages(self) -> list[dict]:
+        rows = [{'role': 'agent', 'text': text} for text in self.done]
+        if self.current.strip():
+            rows.append({'role': 'agent', 'text': self.current, 'streaming': True})
+        return rows
+
+
+def _merge_stream(conversation: list[dict], provisional: list[dict]) -> list[dict]:
+    """Append streamed text the store does not hold yet, without duplicates."""
+    stored = {str(message.get('text') or '').strip() for message in conversation[-8:] if message.get('role') == 'agent'}
+    extra = []
+    for index, message in enumerate(provisional):
+        text = str(message.get('text') or '')
+        if text.strip() in stored:
+            continue
+        extra.append(dict(message, id=f'streaming-{index}', created_at=''))
+    return [*conversation, *extra]
+
+
+def enrich(data: dict, sessions: list[dict], streams: dict | None = None) -> dict:
     """Only real outstanding requests may become attention cards."""
     data = copy.deepcopy(data)
     live = {str(item.get('session_key')): item for item in sessions}
@@ -21,6 +85,9 @@ def enrich(data: dict, sessions: list[dict]) -> dict:
             row.update(status='reply', status_label='Last reply')
         if not attached:
             continue
+        stream = (streams or {}).get(row['id'])
+        if stream is not None:
+            row['conversation'] = _merge_stream(list(row.get('conversation') or []), stream.messages())
         status = attached.get('status')
         if status in {'working', 'starting'}:
             row.update(status='working', status_label='Working')
@@ -52,6 +119,7 @@ class Monitor:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._sessions = []
+        self._streams: dict[str, Stream] = {}
         self._updated = 0.0
         self._thread = threading.Thread(target=self._poll, daemon=True, name='hermes-live-status')
         self._thread.start()
@@ -61,28 +129,40 @@ class Monitor:
 
     def enrich(self, data):
         with self._lock:
-            sessions = self._sessions if time.monotonic() - self._updated < 10 else []
-            return enrich(data, sessions)
+            fresh = time.monotonic() - self._updated < 10
+            return enrich(data, self._sessions if fresh else [], self._streams if fresh else {})
 
     def _poll(self):
         while not self._stop.is_set():
             sessions = []
+            streams = dict(self._streams)
             try:
                 target = backend.find_backend()
                 if target:
                     sessions = backend.call('session.active_list', {}, backend=target, timeout=3).get('sessions', [])
+                    live = set()
                     for session in sessions:
-                        if session.get('status') == 'waiting':
+                        status = session.get('status')
+                        key = str(session.get('session_key') or '')
+                        if status in {'working', 'starting', 'waiting'} and key:
+                            live.add(key)
+                            stream = streams.setdefault(key, Stream())
                             snapshot = backend.call('session.events.since', {
-                                'session_id': session['id'], 'last_seen': 9007199254740991,
+                                'session_id': session['id'], 'last_seen': stream.last_seen,
                             }, backend=target, timeout=3)
+                            stream.apply(snapshot)
                             session['open_requests'] = snapshot.get('open_requests', [])
+                    # A finished turn's text is in the store now; stop carrying it.
+                    streams = {key: stream for key, stream in streams.items() if key in live}
             except Exception:
                 sessions = []
+            working = any(session.get('status') in {'working', 'starting'} for session in sessions)
             with self._lock:
                 self._sessions = sessions
+                self._streams = streams
                 self._updated = time.monotonic()
-            self._stop.wait(2)
+            # Fast while a reply is streaming, relaxed otherwise.
+            self._stop.wait(0.25 if working else 2)
 
 
 def respond(action):

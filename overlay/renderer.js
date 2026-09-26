@@ -324,7 +324,7 @@ function messageNode(session, message) {
 
 function updateMessageNode(wrap, session, message) {
   const role = message.role === 'user' ? 'user' : 'agent'
-  const className = `message ${role}${message.pending ? ' pending' : ''}`
+  const className = `message ${role}${message.pending ? ' pending' : ''}${message.streaming ? ' streaming' : ''}`
   if (wrap.className !== className) wrap.className = className
   const labelText = role === 'user' ? 'You' : providerLabel(session)
   if (wrap.firstChild.firstChild.nodeValue !== labelText) wrap.firstChild.firstChild.nodeValue = labelText

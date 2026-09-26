@@ -529,7 +529,7 @@ class Bridge {
       this.database = new DatabaseSync(databasePath, { readOnly: true });
       this.statements = {
         messageCount: this.database.prepare(
-          "SELECT COUNT(*) AS count FROM projection_thread_messages WHERE thread_id = ?",
+          "SELECT COUNT(*) AS count FROM projection_thread_messages WHERE thread_id = ? AND role IN ('user', 'assistant')",
         ),
         latestAssistant: this.database.prepare(
           "SELECT text FROM projection_thread_messages WHERE thread_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
@@ -547,7 +547,8 @@ class Bridge {
           "SELECT kind, payload_json, created_at FROM projection_thread_activities WHERE thread_id = ? AND kind IN ('user-input.requested', 'user-input.resolved') ORDER BY created_at DESC, sequence DESC LIMIT 1",
         ),
         recentMessages: this.database.prepare(
-          "SELECT message_id, role, text, created_at FROM projection_thread_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT 60",
+          // Reasoning rows share this table; T3 hides them in its own transcript.
+          "SELECT message_id, role, text, created_at FROM projection_thread_messages WHERE thread_id = ? AND role IN ('user', 'assistant') ORDER BY created_at DESC LIMIT 60",
         ),
       };
     } catch (error) {

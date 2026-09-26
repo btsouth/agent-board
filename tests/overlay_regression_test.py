@@ -22,6 +22,33 @@ class OverlayRegression(unittest.TestCase):
         self.assertEqual(result['user_input_questions'][0]['options'],['A','B'])
         self.assertEqual(result['user_input_request_id'],'req')
 
+    def test_hermes_reply_streams_before_the_store_has_it(self):
+        stream = hermes_live.Stream()
+        event = lambda seq, kind, **payload: {'seq': seq, 'type': kind, 'payload': payload}
+        stream.apply({'epoch': 1, 'latest_seq': 3, 'events': [
+            event(1, 'message.start'), event(2, 'message.delta', text='Hel'), event(3, 'message.delta', text='lo'),
+        ]})
+        self.assertEqual(stream.last_seen, 3)
+        row = {'id': 'one', 'provider': 'hermes', 'status': 'working',
+               'conversation': [{'id': '1', 'role': 'user', 'text': 'hi'}]}
+        live = [{'session_key': 'one', 'status': 'working'}]
+        result = hermes_live.enrich({'sessions': [row]}, live, {'one': stream})['sessions'][0]
+        self.assertEqual(result['conversation'][-1]['text'], 'Hello')
+        self.assertTrue(result['conversation'][-1]['streaming'])
+
+        # Completed, and then written to the store: shown once, not twice.
+        stream.apply({'epoch': 1, 'latest_seq': 4, 'events': [event(4, 'message.complete', text='Hello')]})
+        row['conversation'].append({'id': '2', 'role': 'agent', 'text': 'Hello'})
+        result = hermes_live.enrich({'sessions': [row]}, live, {'one': stream})['sessions'][0]
+        self.assertEqual([m['text'] for m in result['conversation']], ['hi', 'Hello'])
+
+    def test_a_new_backend_epoch_restarts_the_stream(self):
+        stream = hermes_live.Stream()
+        stream.apply({'epoch': 1, 'latest_seq': 9, 'events': [{'type': 'message.delta', 'payload': {'text': 'old'}}]})
+        stream.apply({'epoch': 2, 'latest_seq': 1, 'events': [{'type': 'message.delta', 'payload': {'text': 'new'}}]})
+        self.assertEqual(stream.current, 'new')
+        self.assertEqual(stream.last_seen, 1)
+
     def test_immediate_hermes_uses_steer_without_interrupt(self):
         sessions = {'sessions':[{'session_key':'stored','id':'runtime','status':'working'}]}
         with patch.object(backend,'call',side_effect=[sessions,sessions,{'status':'queued'}]) as call:
