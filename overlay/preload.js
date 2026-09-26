@@ -16,5 +16,6 @@ contextBridge.exposeInMainWorld('wow', {
   reply: (sessionId, text) => ipcRenderer.send('wow:reply', { sessionId, text }),
   action: action => ipcRenderer.invoke('wow:action', action),
   chooseDirectory: () => ipcRenderer.invoke('wow:choose-directory'),
-  command: command => ipcRenderer.send('wow:command', command)
+  command: command => ipcRenderer.send('wow:command', command),
+  select: sessionId => ipcRenderer.send('wow:select', sessionId)
 })

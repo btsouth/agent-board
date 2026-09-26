@@ -322,6 +322,9 @@ async function refreshRoster() {
   }
 }
 
+let focusedSession = ''
+let liveWait = null
+
 function liveRequest(payload, timeout = 8000) {
   return new Promise(resolve => {
     let buffer = ''
@@ -330,9 +333,11 @@ function liveRequest(payload, timeout = 8000) {
     const done = result => {
       if (settled) return
       settled = true
+      if (liveWait?.socket === socket) liveWait = null
       socket.destroy()
       resolve(result)
     }
+    if (payload.wait) liveWait = { socket, done }
 
     socket.setTimeout(timeout)
     socket.on('connect', () => socket.write(`${JSON.stringify(payload)}\n`))
@@ -363,9 +368,10 @@ async function fetchLive(wait = 0) {
   // (or the wait runs out), so updates arrive as they happen, not on a timer.
   const waiting = wait > 0 && lastLiveRevision >= 0
   const response = await liveRequest(
-    { type: 'state', revision: lastLiveRevision, ...(waiting ? { wait } : {}) },
+    { type: 'state', revision: lastLiveRevision, conversation_for: focusedSession, ...(waiting ? { wait } : {}) },
     waiting ? (wait + 5) * 1000 : 8000
   )
+  if (response.aborted) return true
   if (response.ok && response.unchanged) {
     send('wow:live', { connected: true, revision: response.revision })
     return true
@@ -415,7 +421,7 @@ function startRosterLoop() {
       const ok = await refreshLive(LIVE_WAIT_S)
       // A failed request, or a bridge too old to hold the request open, answers
       // at once with nothing new; fall back to the poll interval instead of spinning.
-      const quickAndUnchanged = lastLiveRevision === before && Date.now() - started < 100
+      const quickAndUnchanged = lastLiveRevision === before && lastLiveRevision >= 0 && Date.now() - started < 100
       if (!ok || quickAndUnchanged) await new Promise(resolve => setTimeout(resolve, LIVE_POLL_MS))
     }
   })()
@@ -694,6 +700,16 @@ ipcMain.handle('wow:choose-directory', async () => {
   return result.canceled || !result.filePaths.length
     ? { ok: false, cancelled: true }
     : { ok: true, path: result.filePaths[0] }
+})
+
+ipcMain.on('wow:select', (_event, sessionId) => {
+  const next = String(sessionId || '')
+  if (next === focusedSession) return
+  focusedSession = next
+  // The board in hand carries the previous session's conversation: fetch again
+  // now instead of waiting out the current long poll.
+  lastLiveRevision = -1
+  liveWait?.done({ ok: false, aborted: true })
 })
 
 ipcMain.on('wow:command', (_event, command) => {

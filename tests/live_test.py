@@ -82,6 +82,36 @@ class LiveBridgeTest(unittest.TestCase):
         self.assertGreaterEqual(time.monotonic() - started, 0.35)
         self.assertTrue(response["unchanged"])
 
+    def test_only_the_open_session_carries_its_conversation(self):
+        board = {"generated_at": 1, "sessions": [
+            {"id": "a", "conversation": [{"text": "one"}]}, {"id": "b", "conversation": [{"text": "two"}]}]}
+        path = Path(self.temp.name) / "focus.sock"
+        bridge = live.LiveBridge(snapshot=lambda: board, action=self.action, interval=0.05, path=path)
+        bridge.start()
+        self.addCleanup(bridge.stop)
+        bridge.wait_ready(timeout=2)
+        self.socket_path = path
+        sessions = self.request({"type": "state", "conversation_for": "b"})["board"]["sessions"]
+        self.assertNotIn("conversation", sessions[0])
+        self.assertEqual(sessions[1]["conversation"], [{"text": "two"}])
+        # Without the field the whole board comes back, as older overlays expect.
+        self.assertIn("conversation", self.request({"type": "state"})["board"]["sessions"][0])
+
+    def test_a_new_timestamp_alone_is_not_a_change(self):
+        stamp = {"value": 0}
+        def snapshot():
+            stamp["value"] += 1
+            return {"generated_at": stamp["value"], "sessions": [{"id": "a", "age_s": stamp["value"]}]}
+        path = Path(self.temp.name) / "stamp.sock"
+        bridge = live.LiveBridge(snapshot=snapshot, action=self.action, interval=0.05, path=path)
+        bridge.start()
+        self.addCleanup(bridge.stop)
+        bridge.wait_ready(timeout=2)
+        self.socket_path = path
+        first = self.request({"type": "state"})["revision"]
+        time.sleep(0.3)
+        self.assertEqual(self.request({"type": "state"})["revision"], first)
+
     def test_actions_go_through_the_bridge_callback(self):
         action = {"kind": "reply", "session_id": "thread-123", "text": "hello"}
         response = self.request({"type": "action", "action": action})

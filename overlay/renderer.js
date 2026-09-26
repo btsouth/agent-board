@@ -396,7 +396,15 @@ function workingIndicator(session) {
   return line
 }
 
+let reportedSelection
+
 function renderDetail({ preserveScroll = false } = {}) {
+  // The bridge sends only the open session's conversation, so it has to know
+  // which one that is.
+  if (reportedSelection !== selectedId) {
+    reportedSelection = selectedId
+    window.wow.select?.(selectedId || '')
+  }
   const session = selectedSession()
   if (!session) {
     welcomeEl.hidden = false

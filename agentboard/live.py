@@ -22,6 +22,33 @@ MAX_MESSAGE = 1_048_576
 # How long one state request may wait for a change. The overlay long-polls, so a
 # new revision reaches it as soon as it exists instead of at the next poll tick.
 MAX_WAIT = 25.0
+# Fields that change on every snapshot without anything happening. They do not
+# count as a change, but a revision is still forced now and then so ages advance.
+VOLATILE = {"generated_at", "age_s"}
+AGE_REFRESH = 30.0
+
+
+def _change_key(board: Any) -> str:
+    def strip(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: strip(item) for key, item in value.items() if key not in VOLATILE}
+        if isinstance(value, list):
+            return [strip(item) for item in value]
+        return value
+    try:
+        return json.dumps(strip(board), sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _focus(board: dict[str, Any], session_id: str) -> dict[str, Any]:
+    """Only the open session's conversation: the rest of the board is rows."""
+    sessions = []
+    for row in board.get("sessions") or []:
+        if isinstance(row, dict) and row.get("id") != session_id and "conversation" in row:
+            row = {key: value for key, value in row.items() if key != "conversation"}
+        sessions.append(row)
+    return {**board, "sessions": sessions}
 
 
 def socket_path() -> Path:
@@ -77,6 +104,7 @@ class LiveBridge:
         self._changed = threading.Condition(self._lock)
         self._latest: dict[str, Any] = {"error": "live bridge has not published yet"}
         self._latest_key = ""
+        self._latest_at = 0.0
         self._revision = 0
         self._poll_thread: threading.Thread | None = None
         self._server: _ThreadingUnixServer | None = None
@@ -115,12 +143,13 @@ class LiveBridge:
         self._ready.wait(timeout=max(0.0, timeout))
         return self.latest()
 
-    def latest(self) -> dict[str, Any]:
+    def latest(self, focus: str | None = None) -> dict[str, Any]:
         with self._lock:
+            board = self._latest if focus is None else _focus(self._latest, focus)
             return {
                 "revision": self._revision,
                 "at": time.time(),
-                "board": copy.deepcopy(self._latest),
+                "board": copy.deepcopy(board),
             }
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -143,7 +172,8 @@ class LiveBridge:
                     )
             if known_revision == self._revision:
                 return {"ok": True, "revision": self._revision, "unchanged": True}
-            return {"ok": True, **self.latest()}
+            focus = request.get("conversation_for")
+            return {"ok": True, **self.latest(None if focus is None else str(focus))}
         if kind == "action":
             action = request.get("action")
             if not isinstance(action, dict):
@@ -166,14 +196,13 @@ class LiveBridge:
                 board = {"error": str(exc), "sessions": [], "counts": {}}
             # A new revision only when something changed, so an idle board costs
             # the overlay nothing and a waiting request wakes exactly on a change.
-            try:
-                key = json.dumps(board, sort_keys=True, separators=(",", ":"), default=str)
-            except (TypeError, ValueError):
-                key = ""
+            key = _change_key(board)
+            now = time.monotonic()
             with self._changed:
-                if not key or key != self._latest_key or self._revision == 0:
+                if not key or key != self._latest_key or self._revision == 0 or now - self._latest_at >= AGE_REFRESH:
                     self._latest = board
                     self._latest_key = key
+                    self._latest_at = now
                     self._revision += 1
                     self._changed.notify_all()
             self._ready.set()
