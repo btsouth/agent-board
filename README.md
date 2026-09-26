@@ -42,7 +42,7 @@ The bridge is tested on Linux. Windows and macOS bridge hosts are not verified.
 For a managed installation:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.2/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.3/install.sh | bash
 ```
 
 The installer downloads the tagged release under
@@ -144,6 +144,19 @@ than replayed, and a provider failure is surfaced instead of looking like an
 empty "all clear" board. The live overlay uses a direct action path that does not
 touch this acknowledgement watermark.
 
+## Recording a demo
+
+`agent-board demo` switches the running overlay to a fictional board, so a
+screenshot or screen recording never shows your real sessions. An agent streams
+a reply with tool steps, another waits for approval, and anything you do in the
+board gets an answer.
+
+```bash
+agent-board demo            # Ctrl+C to go back to your real sessions
+agent-board demo --speed 2
+agent-board demo --stop
+```
+
 ## Operations
 
 ```bash
@@ -228,6 +241,6 @@ measure Blizzard's font renderer.
 
 ## Status
 
-Version `0.2.2` is a preview. The bridge and addon are tested together, but the
+Version `0.2.3` is a preview. The bridge and addon are tested together, but the
 in-game layout and provider-specific approval/input flows should be exercised in
 the target client after installation.

@@ -5,6 +5,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 addon and the bridge version independently and the payload is versioned by
 `schema`.
 
+## [0.2.3] - 2026-09-26
+
+### Added
+
+- `agent-board demo` shows a scripted, fictional board in the running overlay
+  for screenshots and recordings: an agent works through tool steps and streams
+  a reply, another waits for an approval, and replies, approvals, stops and new
+  sessions get answers. Your real sessions are never shown while it runs, and
+  Ctrl+C or `agent-board demo --stop` switches back. `--speed` plays it faster
+  or slower.
+
+### Fixed
+
+- A session you are watching when its reply lands counts as read.
+- Settle is not offered while a thread is waiting for your approval.
+- The streaming caret stays at the end of a code block instead of below it.
+
 ## [0.2.2] - 2026-09-26
 
 ### Changed

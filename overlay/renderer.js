@@ -568,6 +568,7 @@ function workingIndicator(session) {
 }
 
 let reportedSelection
+let lastDetailNews = false
 let lastScrollHeight = 0
 const jumpLatest = document.getElementById('jump-latest')
 jumpLatest.addEventListener('click', () => {
@@ -638,7 +639,11 @@ function renderDetail({ preserveScroll = false } = {}) {
   renderConversation(session)
   renderQueue(session)
   fitComposer()
-  if (lastDetailId !== session.id) scheduleAutoRead(session)
+  // Opening a session with news, or watching one when its news arrives, both
+  // count as reading it.
+  const news = hasNews(session)
+  if (lastDetailId !== session.id || (news && !lastDetailNews)) scheduleAutoRead(session)
+  lastDetailNews = news
   const changed = lastDetailId !== session.id
   lastDetailId = session.id
   const grew = conversationEl.scrollHeight !== lastScrollHeight
@@ -774,6 +779,8 @@ rowsEl.addEventListener('scroll', closeRowMenu)
 function doneAction(session) {
   const capabilities = session.capabilities || []
   if (['working', 'waiting', 'starting'].includes(session.status)) return null
+  // Waiting on your answer is not done.
+  if (session.approval_request_id || session.user_input_request_id) return null
   if (capabilities.includes('settle')) {
     return session.settled
       ? { kind: 'unsettle', label: 'Unsettle', hint: 'Move back to T3 Code\'s active list' }
@@ -1253,6 +1260,27 @@ window.wow.onLive(state => {
 })
 
 window.wow.onTheme(theme => applyTheme(theme))
+
+// The overlay switched between the real bridge and the demo: forget the
+// selection and everything drawn from it before the new board arrives.
+window.wow.onReset?.(() => {
+  closeRowMenu()
+  clearTimeout(autoReadTimer)
+  board = { sessions: [], counts: {}, projects: [] }
+  selectedId = null
+  selectedCache = null
+  conversationSession = null
+  conversationKey = ''
+  conversationEl.replaceChildren()
+  rowsKey = ''
+  reportedSelection = undefined
+  lastBadgeScore = null
+  pendingMessages.clear()
+  composerInput.value = ''
+  search = ''
+  searchInput.value = ''
+  renderAll()
+})
 
 window.wow.onFocus(({ sessionId }) => {
   if (sessionId) selectSession(sessionId)

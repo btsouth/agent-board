@@ -458,6 +458,12 @@ def build_parser() -> argparse.ArgumentParser:
     unpin = sub.add_parser("unpin", help="unpin the overlay through Hyprland")
     unpin.set_defaults(func=lambda _args: print(json.dumps(hypr.unpin())) or 0)
 
+    demo = sub.add_parser("demo", help="show fictional sessions in the overlay, for screenshots and recordings")
+    demo.add_argument("--stop", action="store_true", help="end a running demo and go back to real sessions")
+    demo.add_argument("--speed", type=float, default=1.0, help="play the scripted agents faster (2) or slower (0.5)")
+    demo.set_defaults(func=lambda args: __import__("agentboard.demo", fromlist=["run"]).stop() if args.stop
+                      else __import__("agentboard.demo", fromlist=["run"]).run(speed=args.speed))
+
     doctor = sub.add_parser("doctor", help="check the pieces this needs")
     doctor.set_defaults(func=cmd_doctor)
 

@@ -339,11 +339,41 @@ async function refreshRoster() {
 let focusedSession = ''
 let liveWait = null
 
+// `agent-board demo` leaves a marker naming its socket and pid. While that
+// process lives, the overlay reads the demo world instead of the real bridge,
+// so a recording never shows anyone's real sessions.
+const DEMO_MARKER = path.join(RUNTIME_DIR, 'agent-board-demo.json')
+let liveSource = null
+
+function demoSocket() {
+  try {
+    const marker = JSON.parse(fs.readFileSync(DEMO_MARKER, 'utf8'))
+    process.kill(Number(marker.pid), 0)
+    return typeof marker.socket === 'string' && marker.socket ? marker.socket : null
+  } catch {
+    return null
+  }
+}
+
+function currentLiveSocket() {
+  const demo = demoSocket()
+  const next = demo || LIVE_SOCKET_PATH
+  if (next !== liveSource) {
+    const first = liveSource === null
+    liveSource = next
+    lastLiveRevision = -1
+    latestRoster = null
+    // Whatever was on screen belongs to the other source: drop it.
+    if (!first) send('wow:reset', { demo: Boolean(demo) })
+  }
+  return next
+}
+
 function liveRequest(payload, timeout = 8000) {
   return new Promise(resolve => {
     let buffer = ''
     let settled = false
-    const socket = net.connect(LIVE_SOCKET_PATH)
+    const socket = net.connect(currentLiveSocket())
     const done = result => {
       if (settled) return
       settled = true
@@ -406,8 +436,9 @@ async function fetchLive(wait = 0) {
   lastLiveRevision = -1
   send('wow:live', { connected: false, error: response.error || 'live bridge unavailable' })
   // Manual source overlays can still use the old snapshot path, but never at the
-  // live polling rate: that would repeatedly spawn provider processes.
-  if (Date.now() >= nextFallbackAt) {
+  // live polling rate: that would repeatedly spawn provider processes. Never in
+  // a demo, where the fallback would put real sessions on screen.
+  if (!demoSocket() && Date.now() >= nextFallbackAt) {
     nextFallbackAt = Date.now() + REFRESH_MS
     await refreshRoster()
   }
@@ -503,6 +534,11 @@ async function handleCommand(payload) {
     case 'refresh':
       await refreshLive()
       return { ok: true }
+    case 'live-reset':
+      lastLiveRevision = -1
+      liveWait?.done({ ok: false, aborted: true })
+      currentLiveSocket()
+      return { ok: true, demo: Boolean(demoSocket()) }
     case 'quit':
       await samplePosition()
       setTimeout(() => {

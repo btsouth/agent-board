@@ -1141,3 +1141,7 @@ body.mode-badge { width: 100%; height: 100%; }
 .row-menu-item.danger:hover, .row-menu-item.danger:focus-visible { background: color-mix(in srgb, var(--error) 12%, transparent); }
 .row-menu-item kbd { color: var(--ink-faint); font-size: 10px; }
 .row-menu-separator { height: 1px; margin: 4px 6px; background: var(--line); }
+
+/* Mid-stream inside a code block, the caret belongs at the end of the code. */
+.message.streaming .message-body > .md-code:last-child::after { display: none; }
+.message.streaming .message-body > .md-code:last-child pre code::after { content: ''; display: inline-block; width: 6px; height: 1em; margin-left: 1px; vertical-align: text-bottom; background: var(--work); animation: working-dot 1s steps(2, start) infinite; }

@@ -49,6 +49,7 @@ check-python: ## Roster, wire format, hostile input, hosts, lint, package, notif
 	$(PY) tests/setup_test.py -v
 	$(PY) tests/update_test.py -v
 	$(PY) tests/service_test.py
+	$(PY) tests/demo_test.py
 
 lint: ## Compile Lua and validate the bootstrap shell
 	bash -n install.sh bin/agent-board
