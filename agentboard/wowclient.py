@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import backend, control, live as live_module, state as state_module, t3
+from . import backend, control, hermes_store, live as live_module, state as state_module, t3
 from .roster import board
 
 ADDON_NAME = "AgentBoard"
@@ -42,7 +42,8 @@ FIELD_SEP = "|"
 # recognising a hand-off by its text being exactly "!focus", which meant a player
 # who typed that sentence got a clipboard instead of a reply.
 OUTBOX_KINDS = {"reply", "new", "approve", "decline", "answer", "focus", "mark_read", "stop"}
-LIVE_KINDS = OUTBOX_KINDS | {"new_project"}
+# The overlay can also settle (T3) and archive (Hermes, T3); the addon cannot.
+LIVE_KINDS = OUTBOX_KINDS | {"new_project", "settle", "unsettle", "archive"}
 
 # What a session id looks like in the store: date_time_hex, or any uuid-shaped
 # string. Used to tell a real entry from the debris of a torn one.
@@ -52,7 +53,7 @@ SESSION_ID_RE = re.compile(r"[A-Za-z0-9_.-]{8,}")
 # know, so both sides can be updated independently without silent nonsense.
 PAYLOAD_TAG = "HE1"
 PAYLOAD_SCHEMA = 5
-BRIDGE_VERSION = "0.1.0"
+BRIDGE_VERSION = "0.2.0"
 
 _INSTALL_HINTS = (
     "/mnt/data/Games/World of Warcraft",
@@ -1136,6 +1137,19 @@ def dispatch_live(action: dict[str, Any], *, state: dict[str, Any], channel: str
             return respond(action)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    if provider == "hermes" and kind in {"settle", "unsettle"}:
+        return {"ok": False, "message": "Hermes sessions are archived, not settled"}
+    if provider == "hermes" and kind == "archive":
+        if host != "local":
+            return {"ok": False, "message": "archive is available only for local Hermes sessions"}
+        result = hermes_store.set_flags(session_id, archived=True)
+        return {"ok": bool(result.get("ok")), "message": "Archived" if result.get("ok") else result.get("error", "archive failed"),
+                "error": "" if result.get("ok") else result.get("error", "archive failed")}
+    if provider == "hermes" and host == "local" and kind == "mark_read":
+        # Hermes's own read marker, so the desktop app agrees; the bridge's
+        # marker below still applies if Hermes cannot be reached.
+        hermes_store.set_flags(session_id, read=True)
 
     if kind == "reply" and provider == "hermes" and host == "local" and action.get("delivery"):
         try:

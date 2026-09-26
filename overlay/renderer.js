@@ -586,7 +586,7 @@ function renderDetail({ preserveScroll = false } = {}) {
   detailMeta.textContent = [
     session.project || session.source,
     session.profile,
-    `${age(session.age_s)} ago`
+    age(session.age_s) === 'now' ? 'active now' : `${age(session.age_s)} ago`
   ].filter(Boolean).join(' / ')
   detailStatus.className = `status-pill ${session.status}`
   detailStatus.textContent = session.status_label || session.status
@@ -611,6 +611,12 @@ function renderDetail({ preserveScroll = false } = {}) {
   composerInput.disabled = Boolean(session.user_input_questions?.length)
   markReadButton.hidden = !Number(session.activity_at || 0) || sessionGroup(session) === 'seen' || sessionGroup(session) === 'running'
   stopButton.hidden = !(['working', 'waiting', 'needs'].includes(session.status) && (session.capabilities || []).includes('stop'))
+  const done = doneAction(session)
+  doneButton.hidden = !done
+  if (done) {
+    doneButton.textContent = done.label
+    doneButton.title = `${done.hint} (E)`
+  }
 
   renderConversation(session)
   renderQueue(session)
@@ -631,6 +637,40 @@ function renderDetail({ preserveScroll = false } = {}) {
     }
     lastScrollHeight = conversationEl.scrollHeight
   })
+}
+
+const doneButton = document.getElementById('done-button')
+
+// "Done with this": settle in T3 (it stays in history), archive in Hermes
+// (it leaves the list). Not offered while the agent is still working.
+function doneAction(session) {
+  const capabilities = session.capabilities || []
+  if (['working', 'waiting', 'starting'].includes(session.status)) return null
+  if (capabilities.includes('settle')) {
+    return session.settled
+      ? { kind: 'unsettle', label: 'Unsettle', hint: 'Move back to T3 Code\'s active list' }
+      : { kind: 'settle', label: 'Settle', hint: 'Mark done in T3 Code; it stays in history' }
+  }
+  if (capabilities.includes('archive')) return { kind: 'archive', label: 'Archive', hint: 'Archive in Hermes; it leaves this list' }
+  return null
+}
+
+async function runDone() {
+  const session = selectedSession()
+  const done = session && doneAction(session)
+  if (!done) return
+  const next = done.kind === 'archive' ? neighbourOf(session.id) : null
+  const result = await runAction({ kind: done.kind, provider: session.provider, host: session.host || 'local', session_id: session.id, text: '' })
+  if (result.ok) {
+    setActionStatus(done.kind === 'archive' ? 'Archived.' : done.kind === 'settle' ? 'Settled in T3 Code.' : 'Back in T3 Code\'s active list.')
+    if (next) selectSession(next)
+  }
+}
+
+function neighbourOf(id) {
+  const sessions = visibleSessions()
+  const index = sessions.findIndex(item => item.id === id)
+  return (sessions[index + 1] || sessions[index - 1])?.id || null
 }
 
 function renderAll() {
@@ -675,6 +715,7 @@ function setBusy(next) {
   declineButton.disabled = next
   answerButton.disabled = next
   markReadButton.disabled = next
+  doneButton.disabled = next
   stopButton.disabled = next
 }
 
@@ -963,6 +1004,7 @@ answerButton.addEventListener('click', () => {
     composerInput.focus()
   }
 })
+doneButton.addEventListener('click', () => void runDone())
 markReadButton.addEventListener('click', () => {
   const session = selectedSession()
   if (session) void runAction({ kind: 'mark_read', provider: session.provider, host: session.host, session_id: session.id, text: String(session.activity_at) })
@@ -1031,6 +1073,11 @@ document.addEventListener('keydown', event => {
   if (event.key.toLowerCase() === 'n' && !writing) {
     event.preventDefault()
     openNewSession()
+    return
+  }
+  if (event.key.toLowerCase() === 'e' && !writing && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault()
+    void runDone()
     return
   }
   if ((event.key === 'ArrowDown' || event.key === 'j') && !writing) {

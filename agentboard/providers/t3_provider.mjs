@@ -758,6 +758,7 @@ class Bridge {
           status_label: statusLabels[item.status] || item.status,
           unread: item.unread,
           snippet: item.snippet,
+          settled: Boolean(item.thread.settledAt),
           age_s: item.age,
           activity_at: item.activityAt,
           activity: item.activity,
@@ -772,7 +773,7 @@ class Bridge {
           user_input_options: item.userInputOptions,
           user_input_questions: item.userInputQuestions,
           conversation: item.conversation,
-          capabilities: ["reply", "new", "approve", "decline", "answer", "focus", "mark_read", "stop"],
+          capabilities: ["reply", "new", "approve", "decline", "answer", "focus", "mark_read", "stop", "settle"],
         })),
       })}\n`,
     );
@@ -807,6 +808,21 @@ class Bridge {
         createdAt: now,
       });
       return { ok: true, message: `Delivered reply to ${action.sessionId}.`, messageId };
+    }
+    // Settle is T3's "done with this thread": it leaves the active list but
+    // stays in history. Archive is a different, stronger thing in T3 and is
+    // only sent when asked for by name.
+    if (action.kind === "settle" || action.kind === "unsettle" || action.kind === "archive") {
+      if (!this.threads.has(action.sessionId)) throw new Error("Session is no longer available.");
+      await this.client.request("orchestration.dispatchCommand", {
+        type: `thread.${action.kind}`,
+        commandId: randomUUID(),
+        threadId: action.sessionId,
+        ...(action.kind === "unsettle" ? { reason: "user" } : {}),
+      });
+      this.dirty = true;
+      const done = { settle: "Settled", unsettle: "Moved back to active", archive: "Archived" }[action.kind];
+      return { ok: true, message: `${done} ${action.sessionId}.` };
     }
     if (action.kind === "stop") {
       await this.client.request("orchestration.dispatchCommand", {
@@ -956,7 +972,7 @@ function snippetLine(text) {
       continue;
     }
     if (fenced || raw.trimStart().startsWith("|")) continue;
-    const candidate = raw.replace(/^\s*(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s?)/, "").replace(/[`*_]/g, "").trim();
+    const candidate = raw.replace(/^\s*(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s?)/, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/[`*_]/g, "").trim();
     // Prose has words; a stray brace or rule line is not a summary.
     if (/\p{L}{2,}/u.test(candidate)) {
       line = candidate;

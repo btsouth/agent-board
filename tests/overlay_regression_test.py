@@ -49,6 +49,23 @@ class OverlayRegression(unittest.TestCase):
         self.assertEqual(stream.current, 'new')
         self.assertEqual(stream.last_seen, 1)
 
+    def test_hermes_archive_goes_through_hermes_own_store(self):
+        with patch.object(wowclient.hermes_store, 'set_flags', return_value={'ok': True}) as flags:
+            result = wowclient.dispatch_live({'kind': 'archive', 'provider': 'hermes', 'session_id': '20260101_000000_abcdef'}, state={})
+        self.assertTrue(result['ok'])
+        flags.assert_called_once_with('20260101_000000_abcdef', archived=True)
+
+    def test_hermes_cannot_be_settled(self):
+        result = wowclient.dispatch_live({'kind': 'settle', 'provider': 'hermes', 'session_id': '20260101_000000_abcdef'}, state={})
+        self.assertFalse(result['ok'])
+
+    def test_hermes_mark_read_also_sets_hermes_own_marker(self):
+        with patch.object(wowclient.hermes_store, 'set_flags', return_value={'ok': True}) as flags, \
+             patch.object(wowclient, '_save_state'):
+            result = wowclient.dispatch_live({'kind': 'mark_read', 'provider': 'hermes', 'session_id': '20260101_000000_abcdef', 'text': '100'}, state={})
+        self.assertTrue(result['ok'])
+        flags.assert_called_once_with('20260101_000000_abcdef', read=True)
+
     def test_immediate_hermes_uses_steer_without_interrupt(self):
         sessions = {'sessions':[{'session_key':'stored','id':'runtime','status':'working'}]}
         with patch.object(backend,'call',side_effect=[sessions,sessions,{'status':'queued'}]) as call:

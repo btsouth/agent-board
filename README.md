@@ -5,7 +5,7 @@ with a native World of Warcraft addon as a fallback. See what needs you, read
 the conversation, reply, answer approvals and input requests, stop a turn, or
 start a new T3 Code session without leaving or reloading the game.
 
-![Agent Board with fictional sessions](docs/art/store-banner.png)
+![Agent Board overlay with fictional sessions](docs/art/overlay-board.png)
 
 ## What it is
 
@@ -39,10 +39,10 @@ The bridge is tested on Linux. Windows and macOS bridge hosts are not verified.
 
 ## Install
 
-For a managed installation, once the `v0.1.0` release is published:
+For a managed installation:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.0/install.sh | bash
 ```
 
 The installer downloads the tagged release under
@@ -73,7 +73,8 @@ agent-board setup \
 1. Start World of Warcraft in **Windowed** or **Windowed Fullscreen** mode.
    Exclusive fullscreen can cover an external overlay.
 2. The bridge detects the game and opens the Agent Board badge. Click the badge,
-   or press `Super+Alt+C`, to toggle the board.
+   or press `Super+Alt+C`, to toggle the board. Drag the badge by the dots on
+   its left. Resize the board and it keeps that size.
 3. Select a session, read the conversation, and reply directly. Press **New
    session** to choose a T3 Code project and start work. The project dropdown is
    themed by Omarchy, and **Add a project folder** opens the native folder picker
@@ -84,6 +85,13 @@ The native addon is still installed. If you choose to use it, `/agents` or
 `/ag` opens its fallback board. Its **Sync** action is a deliberate UI reload;
 automatic loading-screen sync and send-on-sync are disabled by default.
 
+Sessions are grouped under **Needs you**, **Running**, **New replies** and
+**Seen**. Replies render Markdown and tool calls show as expandable steps between
+messages. Keys on the board: `/` search, `j`/`k` move, `N` new session, `E`
+settle (T3 Code) or archive (Hermes), `Esc` back to the badge. In the composer,
+`Enter` sends (or queues while the agent works), `Ctrl+Enter` sends right away
+and `Shift+Enter` adds a line.
+
 The board supports:
 
 | Action | T3 Code | Hermes |
@@ -93,7 +101,9 @@ The board supports:
 | Approve or decline | Yes | Yes, when the store exposes a request |
 | Answer an input request | Yes | No |
 | Stop the active turn | Yes | Yes, local backend only |
-| Mark read | Yes | Yes |
+| Mark read | Yes | Yes, also in Hermes |
+| Settle or unsettle | Yes | No |
+| Archive | No (settle instead) | Yes |
 | Open the optional desktop board on a session | Yes | Existing hand-off behavior |
 
 ## Why the overlay is primary
@@ -215,6 +225,6 @@ measure Blizzard's font renderer.
 
 ## Status
 
-Version `0.1.0` is a preview. The bridge and addon are tested together, but the
+Version `0.2.0` is a preview. The bridge and addon are tested together, but the
 in-game layout and provider-specific approval/input flows should be exercised in
 the target client after installation.

@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 addon and the bridge version independently and the payload is versioned by
 `schema`.
 
+## [0.2.0] - 2026-09-26
+
+### Added
+
+- The board groups sessions by what they need: Needs you, Running, New replies
+  and Seen. Every row says its state in words and unread rows show the first
+  line of the reply.
+- Agent replies render Markdown: code blocks with copy, inline code, lists,
+  tables, quotes and links. Links open in the browser.
+- Tool calls appear between messages as one expandable line per run of steps
+  (commands run, files edited, searches).
+- Replies stream in place. Hermes replies appear while they are written instead
+  of after each tool round, and the overlay receives changes as they happen.
+- Settle and Unsettle for T3 Code threads and Archive for Hermes sessions, from
+  the board or with `E`. Mark read on a Hermes session also marks it read in
+  Hermes.
+- Opening a session with a new reply marks it read.
+- A "Jump to latest" button appears when new text arrives while you are reading
+  further up.
+- The badge shows new replies next to running work and pulses when something
+  new needs you. It can be dragged by its grip and sizes itself to its text.
+- The board opens at 980x720 and remembers the size you give it.
+
+### Changed
+
+- A T3 thread you settled in T3 Code no longer counts as unread here, and a
+  failure you have already seen moves to Seen instead of staying in Needs you.
+- Failed sessions show the reason they failed.
+- Only the open conversation is sent to the overlay, and a board that has not
+  changed sends nothing.
+
+### Fixed
+
+- The badge now appears when the game starts instead of after the first mode
+  change.
+- T3 reasoning rows no longer show up as agent messages.
+- Mark read on a T3 thread takes effect immediately.
+
 ## [0.1.0] - 2026-09-20
 
 ### Added

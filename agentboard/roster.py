@@ -170,6 +170,7 @@ def _snippet(text: str) -> str:
         if fenced or raw.lstrip().startswith("|"):
             continue
         line = re.sub(r"^\s*(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s?)", "", raw)
+        line = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", line)
         line = re.sub(r"[`*_]", "", line).strip()
         # Prose has words; a stray brace or rule line is not a summary.
         if re.search(r"[^\W\d_]{2,}", line):
@@ -346,7 +347,7 @@ def _board_from(conn: sqlite3.Connection, *, limit: int, now: float, cutoff: flo
                     "preview": text.strip().replace("\n", " ")[:180],
                     "snippet": _snippet(text) if role == "assistant" else "",
                     "conversation": _conversation(conn, sid),
-                    "capabilities": ["reply", "focus", "mark_read", "stop"],
+                    "capabilities": ["reply", "focus", "mark_read", "stop", "archive"],
                 }
             )
     finally:
