@@ -66,7 +66,11 @@ function saveDraft() {
   try { localStorage.setItem('composer-drafts-v1', JSON.stringify(Object.fromEntries(drafts))) }
   catch { setStatus('Draft storage is full. Keep this window open until your message is sent.', true) }
 }
-composerInput.addEventListener('input', saveDraft)
+function fitComposer() {
+  composerInput.style.height = 'auto'
+  composerInput.style.height = `${Math.min(composerInput.scrollHeight + 2, 180)}px`
+}
+composerInput.addEventListener('input', () => { saveDraft(); fitComposer() })
 window.addEventListener('beforeunload', saveDraft)
 const queue = new window.MessageQueue({
   storage: localStorage,
@@ -155,18 +159,43 @@ const GROUPS = [
   { key: 'seen', label: 'Seen' }
 ]
 
+// Older bridges do not send `unread`; treat that as unread so nothing hides.
+function isUnread(session) {
+  return session.unread !== false
+}
+
 function sessionGroup(session) {
-  if (session.approval_request_id || session.user_input_request_id || ['needs', 'error'].includes(session.status)) return 'needs'
+  if (session.approval_request_id || session.user_input_request_id || session.status === 'needs') return 'needs'
+  // A failure you have already looked at is history, not a call to action.
+  if (session.status === 'error') return isUnread(session) ? 'needs' : 'seen'
   if (['working', 'waiting', 'starting'].includes(session.status)) return 'running'
-  if (session.status === 'reply') return 'unread'
+  if (session.status === 'reply' && isUnread(session)) return 'unread'
+  if (session.status === 'finished' && session.unread === true) return 'unread'
   return 'seen'
 }
 
 function rowStatus(session) {
   if (session.approval_request_id) return 'Needs approval'
   if (session.user_input_request_id) return 'Needs an answer'
-  const labels = { needs: 'Asked you something', error: 'Error', working: 'Running', waiting: 'Starting', starting: 'Starting', reply: 'Unread reply', finished: 'Finished', idle: 'Idle' }
+  if (session.status === 'error') return isUnread(session) ? 'Failed' : 'Failed · seen'
+  const labels = { needs: 'Asked you something', working: 'Running', waiting: 'Starting', starting: 'Starting', reply: 'Unread reply', finished: 'Finished', idle: 'Idle' }
+  if (session.status === 'reply' && !isUnread(session)) return 'Finished'
   return labels[session.status] || session.status_label || session.status || ''
+}
+
+// Opening a session with news in it counts as reading it, as in any chat app.
+let autoReadTimer = null
+function scheduleAutoRead(session) {
+  clearTimeout(autoReadTimer)
+  if (!session || mode !== 'board' || !connected) return
+  const group = sessionGroup(session)
+  const news = group === 'unread' || (session.status === 'error' && group === 'needs')
+  if (!news || !(session.capabilities || []).includes('mark_read')) return
+  autoReadTimer = setTimeout(() => {
+    const current = selectedSession()
+    if (!current || current.id !== session.id || mode !== 'board' || document.hidden) return
+    void safeAction({ kind: 'mark_read', provider: session.provider, host: session.host || 'local', session_id: session.id, text: String(session.activity_at || '') })
+  }, 1500)
 }
 
 function visibleSessions() {
@@ -181,12 +210,42 @@ function selectedSession() {
   return (board.sessions || []).find(session => session.id === selectedId) || selectedCache
 }
 
+let lastBadgeScore = null
+let reportedBadgeWidth = 0
+
+// The badge window is as wide as its words: "Idle" should not sit in a bar
+// built for "1 needs you · 2 running".
+function fitBadge() {
+  if (mode !== 'badge') return
+  // Sum the parts rather than subtract from the window: right after a mode
+  // switch the window can still be board-sized.
+  const style = getComputedStyle(badge)
+  const parts = [...badge.children].filter(child => child !== badgeText)
+    .reduce((total, child) => total + child.getBoundingClientRect().width + (parseFloat(getComputedStyle(child).marginLeft) || 0), 0)
+  const gaps = (parseFloat(style.columnGap) || 0) * (badge.children.length - 1)
+  const chrome = parts + gaps + parseFloat(style.paddingLeft) + parseFloat(style.paddingRight) +
+    parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth)
+  const width = Math.max(96, Math.min(280, Math.ceil(badgeText.scrollWidth + chrome + 2)))
+  if (Math.abs(width - reportedBadgeWidth) < 3) return
+  reportedBadgeWidth = width
+  window.wow.badgeWidth?.(width)
+}
+
 function renderBadge() {
   const queued = queue.items.filter(item => ['queued', 'held'].includes(item.state)).length
   const state = window.badgeState(board, connected, queued)
   badgeText.textContent = state.label
   badge.classList.toggle('attention', state.attention)
   badge.classList.toggle('running', Boolean(state.running))
+  // A new request or a new reply earns a short pulse, not a permanent alarm.
+  const score = (state.requests || 0) * 1000 + (state.fresh || 0)
+  if (lastBadgeScore !== null && score > lastBadgeScore) {
+    badge.classList.remove('ping')
+    void badge.offsetWidth
+    badge.classList.add('ping')
+  }
+  lastBadgeScore = score
+  requestAnimationFrame(fitBadge)
   badgeText.classList.toggle('hot', state.attention)
   badge.title = `${state.label}\n${state.detail}\nSuper+Alt+C to toggle`
 }
@@ -253,7 +312,9 @@ function renderRows() {
     status.append(statusWord)
     // The status word already says what kind of state this is; the activity
     // text only adds something when it says more than the label.
-    const detail = group === 'seen' ? '' : (session.activity || '')
+    const detail = group === 'seen' ? ''
+      : group === 'unread' || session.status === 'needs' ? (session.snippet || session.activity || '')
+        : (session.activity || '')
     if (detail && detail !== session.status_label && detail !== rowStatus(session)) {
       const activity = document.createElement('span')
       activity.className = 'row-activity'
@@ -301,6 +362,33 @@ function conversationMessages(session) {
   return messages
 }
 
+function messageTime(value) {
+  const stamp = Date.parse(value || '')
+  if (!Number.isFinite(stamp)) return ''
+  const date = new Date(stamp)
+  const today = new Date()
+  const time = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  return date.toDateString() === today.toDateString() ? time : `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`
+}
+
+async function copyText(text, button) {
+  try {
+    await navigator.clipboard.writeText(text)
+    if (button) {
+      const label = button.textContent
+      button.textContent = 'Copied'
+      setTimeout(() => { button.textContent = label }, 1200)
+    }
+  } catch (error) { setActionStatus(`Could not copy: ${error.message}`, true) }
+}
+
+conversationEl.addEventListener('click', event => {
+  const anchor = event.target.closest?.('a[data-external]')
+  if (!anchor) return
+  event.preventDefault()
+  window.wow.openExternal?.(anchor.dataset.external)
+})
+
 function messageNode(session, message) {
   const wrap = document.createElement('div')
   const label = document.createElement('div')
@@ -312,10 +400,7 @@ function messageNode(session, message) {
   copy.className = 'copy-message'
   copy.textContent = 'Copy'
   copy.setAttribute('aria-label', 'Copy message')
-  copy.addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(bodyEl.textContent || ''); copy.textContent = 'Copied' }
-    catch (error) { setActionStatus(`Could not copy: ${error.message}`, true) }
-  })
+  copy.addEventListener('click', () => void copyText(wrap.messageText || '', copy))
   label.append(document.createTextNode(''), copy)
   wrap.append(label, bodyEl)
   updateMessageNode(wrap, session, message)
@@ -326,20 +411,75 @@ function updateMessageNode(wrap, session, message) {
   const role = message.role === 'user' ? 'user' : 'agent'
   const className = `message ${role}${message.pending ? ' pending' : ''}${message.streaming ? ' streaming' : ''}`
   if (wrap.className !== className) wrap.className = className
-  const labelText = role === 'user' ? 'You' : providerLabel(session)
+  const when = messageTime(message.created_at)
+  const labelText = `${role === 'user' ? 'You' : providerLabel(session)}${when ? ` · ${when}` : ''}`
   if (wrap.firstChild.firstChild.nodeValue !== labelText) wrap.firstChild.firstChild.nodeValue = labelText
   // Only touch text that changed, so a streaming reply grows in place and a
   // selection in an earlier message survives the update.
   const bodyEl = wrap.lastChild
-  if (bodyEl.textContent !== (message.text || '')) bodyEl.textContent = message.text || ''
+  const text = message.text || ''
+  if (wrap.messageText !== text) {
+    wrap.messageText = text
+    if (role === 'agent') window.renderMarkdown(bodyEl, text, { onCopy: copyText })
+    else bodyEl.textContent = text
+  }
   wrap.dataset.key = message.id || `${role}:${message.created_at || ''}`
 }
 
 let conversationSession = null
 let workingEl = null
 
+// Runs of tool calls between messages collapse into one line you can open.
+function displayItems(messages) {
+  const items = []
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      const last = items[items.length - 1]
+      if (last?.role === 'steps') last.steps.push(message)
+      else items.push({ role: 'steps', id: `steps:${message.id}`, steps: [message] })
+    } else items.push(message)
+  }
+  return items
+}
+
+function stepsNode() {
+  const wrap = document.createElement('details')
+  const summary = document.createElement('summary')
+  const count = document.createElement('span')
+  count.className = 'steps-count'
+  const last = document.createElement('span')
+  last.className = 'steps-last'
+  summary.append(count, last)
+  const list = document.createElement('ol')
+  list.className = 'steps-list'
+  wrap.append(summary, list)
+  return wrap
+}
+
+function updateStepsNode(wrap, item) {
+  wrap.className = 'message steps'
+  wrap.dataset.key = item.id
+  const [count, last] = wrap.firstChild.children
+  count.textContent = `${item.steps.length} step${item.steps.length === 1 ? '' : 's'}`
+  last.replaceChildren()
+  window.renderInline?.(last, item.steps[item.steps.length - 1].text)
+  const list = wrap.lastChild
+  const rows = [...list.children]
+  item.steps.forEach((step, index) => {
+    let row = rows[index]
+    if (!row) { row = document.createElement('li'); list.append(row) }
+    if (row.dataset.key !== step.id) {
+      row.dataset.key = step.id
+      row.replaceChildren()
+      window.renderInline?.(row, step.text)
+      row.title = messageTime(step.created_at)
+    }
+  })
+  for (const stale of rows.slice(item.steps.length)) stale.remove()
+}
+
 function renderConversation(session) {
-  const messages = conversationMessages(session)
+  const messages = displayItems(conversationMessages(session))
   const running = ['working', 'waiting', 'starting'].includes(session.status)
   const key = JSON.stringify([session.id, messages, running, running && session.activity])
   if (key === conversationKey) return
@@ -355,22 +495,36 @@ function renderConversation(session) {
 
   const nodes = [...conversationEl.querySelectorAll(':scope > .message')]
   messages.forEach((message, index) => {
-    const role = message.role === 'user' ? 'user' : 'agent'
+    const role = message.role === 'steps' ? 'steps' : message.role === 'user' ? 'user' : 'agent'
     const node = nodes[index]
     const key = message.id || `${role}:${message.created_at || ''}`
     // Reuse the node when it is the same message; a window that slid (older
     // messages dropped off the top) or a different message rebuilds from here.
     if (node && node.dataset.key === key && node.classList.contains(role)) {
-      updateMessageNode(node, session, message)
+      if (role === 'steps') updateStepsNode(node, message)
+      else updateMessageNode(node, session, message)
     } else {
       for (const stale of nodes.slice(index)) stale.remove()
       nodes.length = index
-      const fresh = messageNode(session, message)
+      let fresh
+      if (role === 'steps') { fresh = stepsNode(); updateStepsNode(fresh, message) }
+      else fresh = messageNode(session, message)
       conversationEl.append(fresh)
       nodes.push(fresh)
     }
   })
   for (const stale of nodes.slice(messages.length)) stale.remove()
+  // One label per run of messages from the same speaker, as in a chat client.
+  nodes.slice(0, messages.length).forEach((node, index) => {
+    // Steps do not interrupt a speaker's run: the agent working and then
+    // replying is still one turn.
+    let back = index - 1
+    while (back >= 0 && nodes[back].classList.contains('steps')) back -= 1
+    const previous = nodes[back]
+    const continued = !node.classList.contains('steps') && Boolean(previous) &&
+      previous.classList.contains('user') === node.classList.contains('user')
+    node.classList.toggle('continued', continued)
+  })
 
   if (!messages.length) {
     const empty = document.createElement('div')
@@ -397,6 +551,15 @@ function workingIndicator(session) {
 }
 
 let reportedSelection
+let lastScrollHeight = 0
+const jumpLatest = document.getElementById('jump-latest')
+jumpLatest.addEventListener('click', () => {
+  conversationEl.scrollTo({ top: conversationEl.scrollHeight, behavior: 'smooth' })
+  jumpLatest.hidden = true
+})
+conversationEl.addEventListener('scroll', () => {
+  if (conversationEl.scrollHeight - conversationEl.clientHeight - conversationEl.scrollTop < 60) jumpLatest.hidden = true
+})
 
 function renderDetail({ preserveScroll = false } = {}) {
   // The bridge sends only the open session's conversation, so it has to know
@@ -419,6 +582,7 @@ function renderDetail({ preserveScroll = false } = {}) {
   detailEl.hidden = false
   detailProvider.textContent = providerLabel(session)
   detailTitle.textContent = session.title || '(untitled)'
+  detailTitle.title = session.title || ''
   detailMeta.textContent = [
     session.project || session.source,
     session.profile,
@@ -445,16 +609,27 @@ function renderDetail({ preserveScroll = false } = {}) {
   answerButton.textContent = session.user_input_questions?.length ? 'Send answers' : 'Answer request'
   composerInput.placeholder = hasInput ? 'Answer the request above' : 'Message this session'
   composerInput.disabled = Boolean(session.user_input_questions?.length)
-  markReadButton.hidden = !Number(session.activity_at || 0)
+  markReadButton.hidden = !Number(session.activity_at || 0) || sessionGroup(session) === 'seen' || sessionGroup(session) === 'running'
   stopButton.hidden = !(['working', 'waiting', 'needs'].includes(session.status) && (session.capabilities || []).includes('stop'))
 
   renderConversation(session)
   renderQueue(session)
+  fitComposer()
+  if (lastDetailId !== session.id) scheduleAutoRead(session)
   const changed = lastDetailId !== session.id
   lastDetailId = session.id
+  const grew = conversationEl.scrollHeight !== lastScrollHeight
   requestAnimationFrame(() => {
-    if (changed || !preserveScroll || nearBottom) conversationEl.scrollTop = conversationEl.scrollHeight
-    else conversationEl.scrollTop = previousScroll
+    if (changed || !preserveScroll || nearBottom) {
+      conversationEl.scrollTop = conversationEl.scrollHeight
+      jumpLatest.hidden = true
+    } else {
+      conversationEl.scrollTop = previousScroll
+      // Reading back through a reply while the agent keeps writing: say so,
+      // but leave the scroll where the reader put it.
+      if (grew) jumpLatest.hidden = false
+    }
+    lastScrollHeight = conversationEl.scrollHeight
   })
 }
 
@@ -910,5 +1085,13 @@ window.wow.onFocus(({ sessionId }) => {
 window.wow.onMode(({ mode: next }) => {
   mode = next
   body.className = `mode-${next}`
-  if (next === 'board') { renderDetail(); if (newSessionModal.hidden) composerInput.focus() }
+  if (next === 'board') {
+    renderDetail()
+    scheduleAutoRead(selectedSession())
+    if (newSessionModal.hidden) composerInput.focus()
+  } else {
+    clearTimeout(autoReadTimer)
+    reportedBadgeWidth = 0
+    requestAnimationFrame(fitBadge)
+  }
 })

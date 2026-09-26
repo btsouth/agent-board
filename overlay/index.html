@@ -28,9 +28,9 @@
 
         <div class="header-actions">
           <span id="live-state" class="live-state offline"><i></i><span>connecting</span></span>
-          <button id="new-session-button" class="button quiet" type="button">New session</button>
-          <button id="refresh-button" class="icon-button" type="button" title="Refresh now">R</button>
-          <button id="board-close" class="icon-button" type="button" title="Hide to badge (Esc)">x</button>
+          <button id="new-session-button" class="button quiet with-icon" type="button" title="New session (N)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>New session</button>
+          <button id="refresh-button" class="icon-button" type="button" title="Refresh now" aria-label="Refresh"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3"/></svg></button>
+          <button id="board-close" class="icon-button" type="button" title="Hide to badge (Esc)" aria-label="Hide"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
         </div>
       </header>
 
@@ -69,7 +69,10 @@
 
             <div id="attention" class="attention" hidden></div>
             <div id="questions" class="questions" hidden></div>
-            <div id="conversation" class="conversation" aria-live="polite"></div>
+            <div class="conversation-wrap">
+              <div id="conversation" class="conversation" aria-live="polite"></div>
+              <button id="jump-latest" class="jump-latest" type="button" hidden>Jump to latest</button>
+            </div>
 
             <div id="message-queue" class="message-queue" aria-live="polite" hidden></div>
 
@@ -85,7 +88,7 @@
             <div class="composer-wrap">
               <textarea id="composer-input" rows="2" placeholder="Reply to this session"></textarea>
               <div class="composer-actions">
-                <span><kbd>Enter</kbd> send/queue · <kbd>Ctrl+Enter</kbd> send now</span>
+                <span><kbd>Enter</kbd> send, or queue while it works · <kbd>Ctrl+Enter</kbd> send now · <kbd>Shift+Enter</kbd> new line</span>
                 <button id="send-now-button" class="button quiet" type="button" hidden>Send now</button>
                 <button id="send-button" class="button accent" type="button">Send</button>
               </div>
@@ -101,7 +104,7 @@
               <div class="eyebrow">T3 CODE</div>
               <h2 id="new-session-title">Start a new session</h2>
             </div>
-            <button id="new-session-close" class="icon-button" type="button">x</button>
+            <button id="new-session-close" class="icon-button" type="button" aria-label="Close"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
           </div>
           <label>Project</label>
           <div id="project-dropdown" class="dropdown">
@@ -130,6 +133,7 @@
 
     <script src="badge_state.js"></script>
     <script src="message_queue.js"></script>
+    <script src="markdown.js"></script>
     <script src="renderer.js"></script>
   </body>
 </html>

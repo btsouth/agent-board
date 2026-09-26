@@ -31,6 +31,7 @@ check-node: ## Omarchy theme discovery and JavaScript syntax
 	node tests/omarchy_theme_test.js
 	node tests/message_queue_test.js
 	node tests/badge_state_test.js
+	node tests/markdown_test.js
 
 check-python: ## Roster, wire format, hostile input, hosts, lint, package, notifications
 	$(PY) tests/roster_test.py

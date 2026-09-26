@@ -17,5 +17,7 @@ contextBridge.exposeInMainWorld('wow', {
   action: action => ipcRenderer.invoke('wow:action', action),
   chooseDirectory: () => ipcRenderer.invoke('wow:choose-directory'),
   command: command => ipcRenderer.send('wow:command', command),
-  select: sessionId => ipcRenderer.send('wow:select', sessionId)
+  select: sessionId => ipcRenderer.send('wow:select', sessionId),
+  openExternal: url => ipcRenderer.send('wow:open-external', url),
+  badgeWidth: width => ipcRenderer.send('wow:badge-width', width)
 })

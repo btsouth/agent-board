@@ -532,7 +532,7 @@ class Bridge {
           "SELECT COUNT(*) AS count FROM projection_thread_messages WHERE thread_id = ? AND role IN ('user', 'assistant')",
         ),
         latestAssistant: this.database.prepare(
-          "SELECT text FROM projection_thread_messages WHERE thread_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+          "SELECT text, created_at FROM projection_thread_messages WHERE thread_id = ? AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
         ),
         latestActivity: this.database.prepare(
           "SELECT summary FROM projection_thread_activities WHERE thread_id = ? ORDER BY created_at DESC, sequence DESC LIMIT 1",
@@ -545,6 +545,21 @@ class Bridge {
         ),
         latestUserInput: this.database.prepare(
           "SELECT kind, payload_json, created_at FROM projection_thread_activities WHERE thread_id = ? AND kind IN ('user-input.requested', 'user-input.resolved') ORDER BY created_at DESC, sequence DESC LIMIT 1",
+        ),
+        // Completed tool calls, reduced in SQL to the few fields a one-line
+        // step needs: the payloads can carry whole files and base64 images.
+        recentTools: this.database.prepare(
+          `SELECT activity_id, created_at,
+             json_extract(payload_json, '$.itemType') AS item_type,
+             json_extract(payload_json, '$.data.toolName') AS tool_name,
+             substr(coalesce(json_extract(payload_json, '$.data.input.command'),
+                             json_extract(payload_json, '$.data.input.file_path'),
+                             json_extract(payload_json, '$.data.input.query'),
+                             json_extract(payload_json, '$.data.input.description'),
+                             json_extract(payload_json, '$.detail'), ''), 1, 400) AS subject
+           FROM projection_thread_activities
+           WHERE thread_id = ? AND kind = 'tool.completed'
+           ORDER BY created_at DESC, sequence DESC LIMIT 60`,
         ),
         recentMessages: this.database.prepare(
           // Reasoning rows share this table; T3 hides them in its own transcript.
@@ -569,6 +584,25 @@ class Bridge {
     }
   }
 
+  // Tool steps only change when the thread does, so they are cached on its
+  // update time rather than re-read for every thread on every publish.
+  toolSteps(thread) {
+    this.toolCache ||= new Map();
+    const key = String(thread.updatedAt || "");
+    const cached = this.toolCache.get(thread.id);
+    if (cached && cached.key === key) return cached.steps;
+    const steps = this.queryAll("recentTools", thread.id)
+      .reverse()
+      .map((row) => ({
+        id: row.activity_id,
+        role: "tool",
+        text: stepLabel(row.item_type, row.tool_name, row.subject),
+        created_at: String(row.created_at || ""),
+      }));
+    this.toolCache.set(thread.id, { key, steps });
+    return steps;
+  }
+
   queryAll(statement, ...params) {
     this.openDatabase();
     if (!statement || !this.statements?.[statement]) return [];
@@ -589,10 +623,16 @@ class Bridge {
     const userInputActivity = this.query("latestUserInput", thread.id);
     const latestAssistant = this.query("latestAssistant", thread.id);
     const recentMessages = this.queryAll("recentMessages", thread.id).reverse();
+    const steps = this.toolSteps(thread);
     const messageCount = Number(this.query("messageCount", thread.id)?.count || 0);
     const updatedMs = safeTime(thread.updatedAt);
-    const seenMs = Number(this.state.seen[thread.id] || 0);
-    const unread = Boolean(updatedMs && updatedMs > seenMs && latestTurn?.state !== "running");
+    // Seen means opened here, or settled in T3 itself after the last reply: a
+    // thread you already dealt with in T3 is not news on the board.
+    const seenMs = Math.max(Number(this.state.seen[thread.id] || 0), safeTime(thread.settledAt) || 0);
+    const failed = session?.status === "error" || latestTurn?.state === "error";
+    const replyMs = safeTime(latestAssistant?.created_at) || 0;
+    const signalMs = failed ? Math.max(replyMs, updatedMs || 0) : replyMs;
+    const unread = Boolean(signalMs && signalMs > seenMs && latestTurn?.state !== "running");
     const hasApproval = thread.hasPendingApprovals === true && Boolean(pendingApproval?.request_id);
     const hasUserInput = thread.hasPendingUserInput === true;
     let userInput = null;
@@ -630,7 +670,7 @@ class Bridge {
     else if (hasUserInput) activity = userInput?.summary || "Agent needs an answer";
     else if (session?.status === "running") activity = thread.planProgress?.step || "Working";
     else if (session?.status === "starting") activity = "Starting";
-    else if (session?.status === "error") activity = session.lastError || "Session error";
+    else if (failed) activity = session?.lastError || errorLine(latestAssistant?.text) || "Turn failed";
     else if (latestTurn?.state === "completed") activity = "Turn complete";
 
     const project = this.projects.get(thread.projectId);
@@ -647,6 +687,8 @@ class Bridge {
       thread,
       project,
       status,
+      unread,
+      snippet: snippetLine(latestAssistant?.text),
       age: Math.max(0, Math.floor((Date.now() - (updatedMs || Date.now())) / 1000)),
       activity,
       preview,
@@ -660,12 +702,15 @@ class Bridge {
       userInputSummary: userInput?.summary || (hasUserInput ? "Agent needs an input answer" : ""),
       userInputOptions: userInput?.options || "",
       userInputQuestions: userInput?.questions || [],
-      conversation: recentMessages.map((message) => ({
-        id: message.message_id,
-        role: message.role === "user" ? "user" : "agent",
-        text: String(message.text || ""),
-        created_at: String(message.created_at || ""),
-      })),
+      conversation: interleave(
+        recentMessages.map((message) => ({
+          id: message.message_id,
+          role: message.role === "user" ? "user" : "agent",
+          text: String(message.text || ""),
+          created_at: String(message.created_at || ""),
+        })),
+        steps,
+      ),
     };
   }
 
@@ -711,6 +756,8 @@ class Bridge {
           profile: item.profile,
           status: item.status,
           status_label: statusLabels[item.status] || item.status,
+          unread: item.unread,
+          snippet: item.snippet,
           age_s: item.age,
           activity_at: item.activityAt,
           activity: item.activity,
@@ -737,7 +784,8 @@ class Bridge {
     const now = new Date().toISOString();
     if (action.kind === "mark_read") {
       const stamp = Number(action.text) || Math.floor(Date.now() / 1000);
-      this.state.seen[action.sessionId] = stamp * 1000;
+      this.state.seen[action.sessionId] = Math.max(stamp * 1000, Number(this.state.seen[action.sessionId] || 0));
+      this.dirty = true;
       return { ok: true, message: `Marked ${action.sessionId} read.` };
     }
     if (action.kind === "reply") {
@@ -858,6 +906,70 @@ class Bridge {
 function readDefaultModelSelection() {
   const settings = readJson(path.join(t3Home, "userdata", "settings.json"), {});
   return settings?.defaultModelSelection || null;
+}
+
+// One line per tool call, in the words a person would use.
+function stepLabel(itemType, toolName, subject) {
+  const text = String(subject || "").replace(/\s+/g, " ").trim();
+  const short = (value, length = 90) => (value.length > length ? `${value.slice(0, length - 1)}…` : value);
+  const file = text.replace(/^\w+:\s*/, "").replace(/^\{.*"file_path":"([^"]+)".*$/, "$1");
+  const tail = (value) => value.split("/").slice(-2).join("/");
+  switch (itemType) {
+    case "command_execution":
+      return `Ran \`${short(text.replace(/^Bash:\s*/, ""), 80)}\``;
+    case "file_change":
+      return `Edited ${tail(file)}`;
+    case "file_read":
+      return `Read ${tail(file)}`;
+    case "image_view":
+      return `Viewed ${tail(file)}`;
+    case "web_search":
+      return `Searched “${short(text.replace(/^WebSearch:\s*/, "").replace(/^\{"query":"(.*)".*$/, "$1"), 70)}”`;
+    case "collab_agent_tool_call":
+      return `Subagent: ${short(text, 80)}`;
+    default: {
+      const name = String(toolName || "").replace(/^mcp__/, "").replace(/__/g, " › ");
+      if (toolName === "Read") return `Read ${tail(file)}`;
+      if (toolName === "Grep" || toolName === "Glob") return `Searched files for ${short(text.replace(/^\w+:\s*/, ""), 60)}`;
+      return name ? `Used ${short(name, 60)}` : short(text || "Tool call", 90);
+    }
+  }
+}
+
+// Messages and tool steps in time order, keeping only steps inside the window
+// of messages shown: older steps belong to messages that are not on screen.
+function interleave(messages, steps) {
+  if (!steps.length) return messages;
+  const oldest = messages[0]?.created_at || "";
+  const visible = oldest ? steps.filter((step) => step.created_at >= oldest) : steps;
+  return [...messages, ...visible].sort((left, right) => (left.created_at < right.created_at ? -1 : left.created_at > right.created_at ? 1 : 0));
+}
+
+// The first line of prose in a reply, without Markdown punctuation: what a
+// list row can show of "what did it say".
+function snippetLine(text) {
+  let fenced = false;
+  let line = "";
+  for (const raw of String(text || "").split("\n")) {
+    if (/^\s*(`{3,}|~{3,})/.test(raw)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced || raw.trimStart().startsWith("|")) continue;
+    const candidate = raw.replace(/^\s*(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s?)/, "").replace(/[`*_]/g, "").trim();
+    // Prose has words; a stray brace or rule line is not a summary.
+    if (/\p{L}{2,}/u.test(candidate)) {
+      line = candidate;
+      break;
+    }
+  }
+  if (!line) return "";
+  return line.length > 160 ? `${line.slice(0, 159)}…` : line;
+}
+
+function errorLine(text) {
+  const line = String(text || "").trim().split("\n")[0].trim();
+  return line.length > 140 ? `${line.slice(0, 139)}…` : line;
 }
 
 function safeTime(value) {

@@ -7,7 +7,7 @@
 // unsent messages and drafts; native window positions are saved here. Hyprland
 // owns placement/geometry on Wayland, including restoring each window shape.
 
-const { app, BrowserWindow, dialog, ipcMain, nativeTheme, screen } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, nativeTheme, screen, shell } = require('electron')
 const { execFile } = require('node:child_process')
 const fs = require('node:fs')
 const net = require('node:net')
@@ -77,7 +77,7 @@ function startThemeWatcher() {
 
 const GEOMETRY = {
   badge: { width: 150, height: 26 },
-  board: { width: 760, height: 640 }
+  board: { width: 980, height: 720 }
 }
 const MARGIN = 24
 
@@ -102,10 +102,24 @@ let displayedMode = null
 let transitioning = false
 let samplingPosition = false
 
+// The board keeps the size you give it; the badge is always its own size.
+const MIN_BOARD = { width: 640, height: 460 }
+
+function geometryFor(shape) {
+  const base = GEOMETRY[shape] || GEOMETRY.board
+  const saved = positions[shape]
+  if (shape !== 'board' || !Number.isFinite(saved?.width) || !Number.isFinite(saved?.height)) return base
+  return { width: Math.max(MIN_BOARD.width, saved.width), height: Math.max(MIN_BOARD.height, saved.height) }
+}
+
 function rememberPosition(shape, position) {
   if (!shape || !Number.isFinite(position?.x) || !Number.isFinite(position?.y)) return
-  if (positions[shape]?.x === position.x && positions[shape]?.y === position.y) return
-  positions[shape] = { x: Math.round(position.x), y: Math.round(position.y) }
+  const sized = shape === 'board' && Number.isFinite(position.width) && Number.isFinite(position.height)
+  const previous = positions[shape]
+  if (previous?.x === position.x && previous?.y === position.y &&
+    (!sized || (previous.width === position.width && previous.height === position.height))) return
+  positions[shape] = { x: Math.round(position.x), y: Math.round(position.y),
+    ...(sized ? { width: Math.round(position.width), height: Math.round(position.height) } : {}) }
   try {
     fs.writeFileSync(`${POSITION_PATH}.tmp`, JSON.stringify(positions), { mode: 0o600 })
     fs.renameSync(`${POSITION_PATH}.tmp`, POSITION_PATH)
@@ -120,7 +134,7 @@ async function nativePosition() {
         if (error) return resolve(null)
         try {
           const client = JSON.parse(stdout).find(item => item.pid === process.pid)
-          resolve(client?.at ? { x: client.at[0], y: client.at[1] } : null)
+          resolve(client?.at ? { x: client.at[0], y: client.at[1], width: client.size?.[0], height: client.size?.[1] } : null)
         } catch { resolve(null) }
       })
     })
@@ -208,7 +222,7 @@ async function pinWindow(nextMode, returnFocus = false) {
     return
   }
 
-  const geometry = GEOMETRY[nextMode] || GEOMETRY.board
+  const geometry = geometryFor(nextMode)
   const anchor = process.env.AGENT_BOARD_ANCHOR || 'game'
   const { error, stdout } = await cli([
     'pin',
@@ -237,7 +251,7 @@ function placeInitial() {
   }
 
   const area = screen.getPrimaryDisplay().workArea
-  const geometry = GEOMETRY[mode]
+  const geometry = geometryFor(mode)
   win.setBounds({
     x: Math.max(area.x, area.x + area.width - geometry.width - MARGIN),
     y: area.y + MARGIN,
@@ -258,7 +272,7 @@ function applyMode(nextMode) {
     if (displayedMode) rememberPosition(displayedMode, await nativePosition())
     displayedMode = null
     if (epoch !== modeEpoch) return
-    const geometry = GEOMETRY[nextMode]
+    const geometry = geometryFor(nextMode)
     const returnFocus = nextMode === 'badge' && win.isFocused()
     win.setFocusable(nextMode === 'board')
     if (HEADLESS) {
@@ -589,7 +603,7 @@ async function alreadyRunning() {
 }
 
 function createWindow() {
-  const geometry = GEOMETRY[mode]
+  const geometry = geometryFor(mode)
 
   win = new BrowserWindow({
     width: geometry.width,
@@ -700,6 +714,25 @@ ipcMain.handle('wow:choose-directory', async () => {
   return result.canceled || !result.filePaths.length
     ? { ok: false, cancelled: true }
     : { ok: true, path: result.filePaths[0] }
+})
+
+ipcMain.on('wow:badge-width', (_event, width) => {
+  const next = Math.max(96, Math.min(280, Math.round(Number(width) || 0)))
+  if (!next || next === GEOMETRY.badge.width) return
+  GEOMETRY.badge.width = next
+  // Re-pin at the same spot once any transition in flight has settled: on
+  // Wayland the compositor owns the size.
+  void modeTransition.then(() => {
+    if (mode === 'badge' && !hiddenForGame) return applyMode('badge')
+  })
+})
+
+ipcMain.on('wow:open-external', (_event, url) => {
+  // Links in agent replies open in the browser; anything but http(s) is ignored.
+  try {
+    const parsed = new URL(String(url || ''))
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') void shell.openExternal(parsed.href)
+  } catch {}
 })
 
 ipcMain.on('wow:select', (_event, sessionId) => {

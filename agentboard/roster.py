@@ -15,6 +15,7 @@ Status priority, highest first: needs > error > working > reply > idle/finished.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -157,6 +158,23 @@ def _conversation(conn: sqlite3.Connection, session_id: str, limit: int = 60) ->
         }
         for row in reversed(rows)
     ]
+
+
+def _snippet(text: str) -> str:
+    """First line of prose in a reply, without Markdown punctuation."""
+    fenced = False
+    for raw in (text or "").splitlines():
+        if re.match(r"^\s*(`{3,}|~{3,})", raw):
+            fenced = not fenced
+            continue
+        if fenced or raw.lstrip().startswith("|"):
+            continue
+        line = re.sub(r"^\s*(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s?)", "", raw)
+        line = re.sub(r"[`*_]", "", line).strip()
+        # Prose has words; a stray brace or rule line is not a summary.
+        if re.search(r"[^\W\d_]{2,}", line):
+            return line if len(line) <= 160 else line[:159] + "\u2026"
+    return ""
 
 
 def _asks_a_question(text: str) -> bool:
@@ -317,6 +335,7 @@ def _board_from(conn: sqlite3.Connection, *, limit: int, now: float, cutoff: flo
                     "profile": row["profile_name"] or "",
                     "status": status,
                     "status_label": STATUS_LABEL[status],
+                    "unread": activity_at > read_at,
                     "age_s": max(0, int(now - activity_at)),
                     # Epoch seconds, so the bridge can tell which sessions started
                     # needing the player since their last in-game sync.
@@ -325,6 +344,7 @@ def _board_from(conn: sqlite3.Connection, *, limit: int, now: float, cutoff: flo
                     "messages": int(row["message_count"] or 0),
                     "cost_usd": round(float(row["estimated_cost_usd"] or 0), 4),
                     "preview": text.strip().replace("\n", " ")[:180],
+                    "snippet": _snippet(text) if role == "assistant" else "",
                     "conversation": _conversation(conn, sid),
                     "capabilities": ["reply", "focus", "mark_read", "stop"],
                 }

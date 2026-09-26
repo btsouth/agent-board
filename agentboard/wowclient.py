@@ -876,7 +876,7 @@ def apply_read_suppressions(rows: Iterable[dict], state: dict) -> list[dict]:
         key = _read_key(str(row.get("host") or "local"), str(row.get("id") or ""))
         activity = _number(row.get("activity_at"), 0)
         if activity > 0 and marks.get(key) == activity and row.get("status") in ("needs", "reply", "error", "finished"):
-            row.update(status="idle", status_label="Idle", dismissed=True)
+            row.update(status="idle", status_label="Idle", dismissed=True, unread=False)
         result.append(row)
     return result
 
