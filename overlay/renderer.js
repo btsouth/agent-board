@@ -1261,6 +1261,28 @@ window.wow.onLive(state => {
 
 window.wow.onTheme(theme => applyTheme(theme))
 
+// Demo autoplay: a visible button press, or typing at a person's pace.
+window.wow.onDemo?.(async ({ click, type }) => {
+  if (click) {
+    const button = document.getElementById(click)
+    if (!button || button.hidden || button.disabled) return
+    button.classList.add('demo-press')
+    await new Promise(resolve => setTimeout(resolve, 260))
+    button.classList.remove('demo-press')
+    button.click()
+  } else if (type) {
+    composerInput.focus()
+    composerInput.value = ''
+    for (const char of type) {
+      composerInput.value += char
+      fitComposer()
+      await new Promise(resolve => setTimeout(resolve, 45 + Math.random() * 55))
+    }
+    await new Promise(resolve => setTimeout(resolve, 350))
+    void sendComposer()
+  }
+})
+
 // The overlay switched between the real bridge and the demo: forget the
 // selection and everything drawn from it before the new board arrives.
 window.wow.onReset?.(() => {

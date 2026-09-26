@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 addon and the bridge version independently and the payload is versioned by
 `schema`.
 
+## [0.2.4] - 2026-09-26
+
+### Added
+
+- `agent-board demo --autoplay` drives the board by itself for a hands-free
+  recording: it opens the board as the first agent starts, approves a waiting
+  session with a visible button press, types a reply into the composer and sends
+  it, then collapses to the badge. It only works while a demo is running.
+
 ## [0.2.3] - 2026-09-26
 
 ### Added

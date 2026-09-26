@@ -107,9 +107,12 @@ def _iso(epoch: float) -> str:
 
 
 class DemoWorld:
-    def __init__(self, *, speed: float = 1.0, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, *, speed: float = 1.0, lead: float = 0.0, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
         self._speed = max(0.1, float(speed))
+        # Seconds before the scripted agents start: autoplay uses it to open the
+        # board first, so the recording catches the first tool step.
+        self._lead = max(0.0, float(lead))
         self._lock = threading.Lock()
         self._events: list[tuple[float, int, Callable[[], None]]] = []
         self._order = 0
@@ -165,14 +168,14 @@ class DemoWorld:
         self._message(hero, "user", HERO_PROMPT, ago=20)
         self._turn(hero, ["Searched files for retryUpload", "Read src/upload.ts", "Read src/backoff.ts",
                           "Ran `npm test -- upload`", "Edited src/upload.ts", "Edited test/upload.test.ts",
-                          "Ran `npm test -- upload`"], HERO_REPLY, start=2.0, gap=1.6,
+                          "Ran `npm test -- upload`"], HERO_REPLY, start=2.0 + self._lead, gap=1.6,
                    activities=["Reading the upload path", "Running the upload tests", "Fixing the retry rule", "Rerunning the tests"])
 
         incident = self._session("demo-incident", "hermes", "Summarise the incident thread", "ops", "working", 45,
                                  activity="Reading 42 messages")
         self._message(incident, "user", "Can you summarise yesterday's login incident thread for the team?", ago=45)
         self._turn(incident, ["Read #incident-login (42 messages)", "Searched deploy log for cache TTL"], HERMES_REPLY,
-                   start=14.0, gap=5.0, activities=["Reading 42 messages", "Checking the deploy log", "Writing the summary"])
+                   start=14.0 + self._lead, gap=5.0, activities=["Reading 42 messages", "Checking the deploy log", "Writing the summary"])
 
         billing = self._session("demo-billing", "t3", "Migrate the billing webhooks", "billing", "needs", 70,
                                 approval_request_id="demo-approval-1",
@@ -394,8 +397,34 @@ def stop() -> int:
     return 0
 
 
-def run(*, speed: float = 1.0) -> int:
-    world = DemoWorld(speed=speed)
+# The autoplay script: (seconds after the previous step, overlay command). Times
+# are at speed 1; the overlay does the clicking and typing itself, through the
+# same buttons and composer a person would use.
+AUTOPLAY = [
+    (2.5, "focus:demo-uploader"),
+    (30.0, "focus:demo-billing"),
+    (2.5, "demo:click:approve-button"),
+    (13.0, "focus:demo-uploader"),
+    (2.0, "demo:type:open the PR and ask Sam to review it"),
+    (12.0, "badge"),
+]
+AUTOPLAY_LEAD = 3.0
+
+
+def _autoplay(speed: float, stopping: threading.Event) -> None:
+    for delay, command in AUTOPLAY:
+        if stopping.wait(delay / max(0.1, speed)):
+            return
+        try:
+            control.send(command)
+        except Exception as exc:  # noqa: BLE001 - say what failed and keep the demo up
+            print(f"autoplay: {command.split(':')[0]} failed: {exc}")
+            return
+    print("autoplay finished. Ctrl+C to go back to your real sessions.")
+
+
+def run(*, speed: float = 1.0, autoplay: bool = False) -> int:
+    world = DemoWorld(speed=speed, lead=AUTOPLAY_LEAD if autoplay else 0.0)
     path = socket_path()
     hub = live.LiveBridge(snapshot=world.snapshot, action=world.action, interval=0.1, path=path)
     hub.start()
@@ -411,6 +440,16 @@ def run(*, speed: float = 1.0) -> int:
     print("an agent starts streaming in a few seconds. Ctrl+C (or `agent-board demo --stop`) to go back.")
     if not control.is_running():
         print("the overlay is not running yet; it will pick the demo up when it starts.")
+    if autoplay:
+        if not control.is_running():
+            print("autoplay needs the overlay: start WoW (or `agent-board overlay`) and run this again.")
+        else:
+            try:
+                control.send("badge")
+            except Exception:  # noqa: BLE001 - the first autoplay step reports a dead overlay
+                pass
+            print("autoplay: the board opens in a few seconds and runs the whole story by itself.")
+            threading.Thread(target=_autoplay, args=(speed, stopping), daemon=True, name="demo-autoplay").start()
     try:
         stopping.wait()
     finally:

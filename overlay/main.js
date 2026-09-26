@@ -506,6 +506,18 @@ async function handleCommand(payload) {
     return { ok: true, mode, sessionId }
   }
 
+  // Demo autoplay drives the real UI: press a button, type into the composer.
+  // Only while a demo is running, so nothing can type into real sessions.
+  if (command.startsWith('demo:')) {
+    if (!demoSocket()) return { ok: false, error: 'no demo is running' }
+    const [, verb, ...rest] = command.split(':')
+    const value = rest.join(':')
+    if (verb === 'click') send('wow:demo', { click: value })
+    else if (verb === 'type') send('wow:demo', { type: value })
+    else return { ok: false, error: `unknown demo command: ${verb}` }
+    return { ok: true }
+  }
+
   if (command.startsWith('mode:')) {
     const requested = command.slice('mode:'.length)
     applyMode(requested === 'toggle' ? (mode === 'board' ? 'badge' : 'board') : requested)

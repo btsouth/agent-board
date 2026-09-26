@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('wow', {
   onLive: callback => ipcRenderer.on('wow:live', (_event, data) => callback(data)),
   onTheme: callback => ipcRenderer.on('wow:theme', (_event, data) => callback(data)),
   onReset: callback => ipcRenderer.on('wow:reset', (_event, data) => callback(data)),
+  onDemo: callback => ipcRenderer.on('wow:demo', (_event, data) => callback(data)),
   reply: (sessionId, text) => ipcRenderer.send('wow:reply', { sessionId, text }),
   action: action => ipcRenderer.invoke('wow:action', action),
   chooseDirectory: () => ipcRenderer.invoke('wow:choose-directory'),
