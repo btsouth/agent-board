@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# agent-board launcher: picks the interpreter that has Agent's deps (websockets),
+# then hands off to the CLI.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_PY="${HERMES_HOME:-$HOME/.hermes}/hermes-agent/venv/bin/python"
+
+if [[ -x "$VENV_PY" ]]; then
+  PY="$VENV_PY"
+else
+  PY="$(command -v python3)"
+fi
+
+export AGENT_BOARD_ROOT="$ROOT"
+exec "$PY" -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from agentboard.cli import main; raise SystemExit(main())' "$ROOT" "$@"

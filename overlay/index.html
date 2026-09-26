@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'"
+    />
+    <title>Agent Board</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body class="mode-badge">
+    <div id="badge" role="button" aria-label="Open Agent Board" title="Agent Board · Super+Alt+C">
+      <span class="crest">AB</span>
+      <span class="badge-content"><span class="badge-text">Connecting…</span><span class="badge-detail">T3 Code + Hermes</span></span>
+    </div>
+
+    <div id="board">
+      <header id="board-header">
+        <div class="brand">
+          <span class="crest">AB</span>
+          <div>
+            <div class="brand-name">AGENT BOARD</div>
+            <div class="brand-subtitle">T3 Code + Hermes</div>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <span id="live-state" class="live-state offline"><i></i><span>connecting</span></span>
+          <button id="new-session-button" class="button quiet" type="button">New session</button>
+          <button id="refresh-button" class="icon-button" type="button" title="Refresh now">R</button>
+          <button id="board-close" class="icon-button" type="button" title="Hide to badge (Esc)">x</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="sidebar">
+          <div class="search-wrap">
+            <input id="search-input" type="search" placeholder="Search active sessions" spellcheck="false" />
+            <kbd>/</kbd>
+          </div>
+
+          <div class="sidebar-heading">
+            <span>Active sessions</span>
+            <span id="sidebar-count"></span>
+          </div>
+
+          <div id="rows" role="listbox" aria-label="Agent sessions"></div>
+          <div id="empty">No active or recent sessions.</div>
+        </aside>
+
+        <section id="detail" class="detail">
+          <div id="welcome" class="welcome">
+            <span class="crest large">AB</span>
+            <h1>Your agents, live.</h1>
+            <p>Select a session to read its conversation and reply without leaving the game.</p>
+            <div class="welcome-hints">
+              <span><kbd>N</kbd> new session</span>
+              <span><kbd>/</kbd> search</span>
+              <span><kbd>j</kbd><kbd>k</kbd> move</span>
+            </div>
+          </div>
+
+          <div id="session-detail" hidden>
+            <div class="detail-head">
+              <div class="detail-title-wrap">
+                <div id="detail-provider" class="eyebrow"></div>
+                <h1 id="detail-title"></h1>
+                <div id="detail-meta" class="detail-meta"></div>
+              </div>
+              <div id="detail-status" class="status-pill"></div>
+            </div>
+
+            <div id="attention" class="attention" hidden></div>
+            <div id="questions" class="questions" hidden></div>
+            <div id="conversation" class="conversation" aria-live="polite"></div>
+
+            <div id="message-queue" class="message-queue" aria-live="polite" hidden></div>
+
+            <div class="action-bar">
+              <button id="approve-button" class="button positive" type="button" hidden>Approve</button>
+              <button id="decline-button" class="button danger" type="button" hidden>Decline</button>
+              <button id="answer-button" class="button positive" type="button" hidden>Answer request</button>
+              <button id="mark-read-button" class="button quiet" type="button">Mark read</button>
+              <button id="stop-button" class="button danger" type="button" hidden>Stop turn</button>
+              <span id="action-status" class="action-status"></span>
+            </div>
+
+            <div class="composer-wrap">
+              <textarea id="composer-input" rows="2" placeholder="Reply to this session"></textarea>
+              <div class="composer-actions">
+                <span><kbd>Enter</kbd> send/queue · <kbd>Ctrl+Enter</kbd> send now</span>
+                <button id="send-now-button" class="button quiet" type="button" hidden>Send now</button>
+                <button id="send-button" class="button accent" type="button">Send</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <div id="new-session" class="modal-backdrop" hidden>
+        <section class="modal" role="dialog" aria-modal="true" aria-labelledby="new-session-title">
+          <div class="modal-head">
+            <div>
+              <div class="eyebrow">T3 CODE</div>
+              <h2 id="new-session-title">Start a new session</h2>
+            </div>
+            <button id="new-session-close" class="icon-button" type="button">x</button>
+          </div>
+          <label>Project</label>
+          <div id="project-dropdown" class="dropdown">
+            <button id="project-trigger" class="dropdown-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+              <span id="project-trigger-label">Choose a project</span>
+              <span class="dropdown-chevron">⌄</span>
+            </button>
+            <div id="project-menu" class="dropdown-menu" role="listbox" hidden></div>
+          </div>
+          <button id="add-project-button" class="add-project" type="button">Add a project folder</button>
+          <div id="selected-project-path"></div>
+          <label for="new-session-prompt">Prompt</label>
+          <textarea id="new-session-prompt" rows="6" placeholder="What should the agent do?"></textarea>
+          <div class="modal-actions">
+            <span id="new-session-status"></span>
+            <button id="new-session-start" class="button accent" type="button">Start session</button>
+          </div>
+        </section>
+      </div>
+
+      <footer id="board-footer">
+        <span id="board-status">Waiting for the live bridge.</span>
+        <span id="session-window"></span>
+      </footer>
+    </div>
+
+    <script src="badge_state.js"></script>
+    <script src="message_queue.js"></script>
+    <script src="renderer.js"></script>
+  </body>
+</html>

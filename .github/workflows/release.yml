@@ -1,0 +1,55 @@
+name: release
+
+# Tag a commit with the version the changelog records and this publishes the addon
+# zip as a release asset. The gates run first and the package step refuses a
+# version the changelog has not recorded, so a tag that does not match the code
+# cannot produce an artifact.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua 5.1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Every offline gate and Lua compilation
+        run: make check lint
+
+      - name: The tag has to be the version the changelog records
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          recorded=$(python3 -c "import sys; sys.path.insert(0, 'scripts'); import package_addon; print(package_addon.changelog_version()[0])")
+          echo "tag $tag, changelog $recorded"
+          test "$tag" = "$recorded"
+
+      - name: Build the addon zip
+        run: python3 scripts/package_addon.py --out dist
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          fail_on_unmatched_files: true
+          body_path: docs/releases/${{ github.ref_name }}.md
+          prerelease: true

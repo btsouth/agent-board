@@ -1,0 +1,17 @@
+<Bindings>
+  <Binding name="AGENTBOARD_TOGGLE" header="AGENTBOARD">
+    AgentBoard:Toggle()
+  </Binding>
+  <Binding name="AGENTBOARD_SYNC">
+    AgentBoard:Sync()
+  </Binding>
+  <Binding name="AGENTBOARD_REPLY">
+    AgentBoard:ReplyToSelected()
+  </Binding>
+  <Binding name="AGENTBOARD_PAGE_UP">
+    AgentBoard:PageUp()
+  </Binding>
+  <Binding name="AGENTBOARD_PAGE_DOWN">
+    AgentBoard:PageDown()
+  </Binding>
+</Bindings>

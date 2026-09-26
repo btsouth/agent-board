@@ -1,0 +1,7 @@
+{
+  "name": "agent-board-overlay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Board: a pinned board of agent sessions over the game.",
+  "main": "main.js"
+}

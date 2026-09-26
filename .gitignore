@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+docs/panel-preview.html
+
+# Built release artifacts: rebuilt by `make package`, never committed.
+dist/
+*.zip
+
+# Command Code agent config, including learned preferences. Personal to a machine,
+# not part of the shipped product.
+.commandcode/

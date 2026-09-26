@@ -1,0 +1,37 @@
+name: gates
+
+# Everything here runs without a game client and without network access, which is
+# the point: the two things that break this project in practice are a Lua API the
+# client rejects and a payload format the two halves disagree about, and both are
+# catchable offline.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua 5.1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Every offline gate and Lua compilation
+        run: make check lint
+
+      - name: The release zip is what the client and an installer want
+        run: python3 scripts/package_addon.py --out dist
