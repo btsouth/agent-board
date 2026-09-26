@@ -6,7 +6,6 @@
 const body = document.body
 const badge = document.getElementById('badge')
 const badgeText = badge.querySelector('.badge-text')
-const badgeDetail = badge.querySelector('.badge-detail')
 const rowsEl = document.getElementById('rows')
 const emptyEl = document.getElementById('empty')
 const liveStateEl = document.getElementById('live-state')
@@ -161,7 +160,6 @@ function renderBadge() {
   const queued = queue.items.filter(item => ['queued', 'held'].includes(item.state)).length
   const state = window.badgeState(board, connected, queued)
   badgeText.textContent = state.label
-  badgeDetail.textContent = state.detail
   badge.classList.toggle('attention', state.attention)
   badge.classList.toggle('running', Boolean(state.running))
   badgeText.classList.toggle('hot', state.attention)

@@ -76,7 +76,7 @@ function startThemeWatcher() {
 }
 
 const GEOMETRY = {
-  badge: { width: 286, height: 46 },
+  badge: { width: 150, height: 26 },
   board: { width: 760, height: 640 }
 }
 const MARGIN = 24
@@ -608,7 +608,13 @@ function createWindow() {
     }
   })
 
-  win.once('ready-to-show', () => {
+  // On Wayland a hidden transparent window never paints, so ready-to-show may
+  // never fire and the badge would stay unmapped until a mode change. The page
+  // load is the fallback; whichever arrives first shows the window once.
+  let firstShown = false
+  const showFirst = () => {
+    if (firstShown || !win || win.isDestroyed()) return
+    firstShown = true
     if (HEADLESS) {
       // A self test renders the real markup without ever mapping a window over
       // whatever the user is doing.
@@ -620,7 +626,9 @@ function createWindow() {
     if (!hiddenForGame) {
       void applyMode(mode)
     }
-  })
+  }
+  win.once('ready-to-show', showFirst)
+  win.webContents.once('did-finish-load', showFirst)
 
   win.on('closed', () => {
     win = null
