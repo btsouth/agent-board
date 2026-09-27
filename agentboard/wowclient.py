@@ -53,7 +53,7 @@ SESSION_ID_RE = re.compile(r"[A-Za-z0-9_.-]{8,}")
 # know, so both sides can be updated independently without silent nonsense.
 PAYLOAD_TAG = "HE1"
 PAYLOAD_SCHEMA = 5
-BRIDGE_VERSION = "0.2.7"
+BRIDGE_VERSION = "0.2.8"
 
 _INSTALL_HINTS = (
     "/mnt/data/Games/World of Warcraft",
@@ -876,6 +876,13 @@ def apply_read_suppressions(rows: Iterable[dict], state: dict) -> list[dict]:
     return result
 
 
+def remote_read_marks(data: dict, state: dict) -> dict:
+    """Remote rows have no read flag the overlay can set, so the bridge's own
+    marks apply to them live, as they already do on the in-game board."""
+    return dict(data, sessions=[row if (row.get("host") or "local") == "local" else apply_read_suppressions([row], state)[0]
+                                for row in data.get("sessions") or []])
+
+
 def _pid_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -889,17 +896,18 @@ def _pid_running(pid: int) -> bool:
 
 
 def _reconcile_pending(state: dict[str, Any]) -> tuple[list[str], list[dict[str, str]]]:
-    """Settle the CLI fallbacks that were still running when we last looked.
+    """Settle the one-shot turns that were still running when we last looked.
 
     A detached `hermes chat --resume` takes minutes and can refuse the reply in
     its first second. Until it is seen to finish, its entry is neither delivered
     nor failed: it stays journaled and unacknowledged without launching again.
+    Returns the keys never to send again and the outcomes worth reporting.
     """
     from . import backend as backend_module
 
     pending = state.get("pending") or {}
-    delivered: list[str] = []
-    refused: list[dict[str, str]] = []
+    settled: list[str] = []
+    reports: list[dict[str, str]] = []
 
     for key, item in list(pending.items()):
         completion = str(item.get("completion") or "")
@@ -918,17 +926,62 @@ def _reconcile_pending(state: dict[str, Any]) -> tuple[list[str], list[dict[str,
         if exit_code is None and not reason:
             # No proof of success and no proof of failure: preserve the journal
             # and prevent a duplicate launch, even after a watcher restart.
-            refused.append({**entry, "outcome": "uncertain: CLI exited without a completion record; inspect the log"})
+            reports.append({**entry, "outcome": "uncertain: CLI exited without a completion record; inspect the log"})
             continue
-        if reason or (exit_code is not None and int(exit_code or 0) != 0):
-            refused.append({**entry, "outcome": f"failed: the CLI turn was refused ({reason or 'see the log'})"})
+        if backend_module.not_started(reason, exit_code):
+            reports.append({**entry, "outcome": f"failed: the CLI turn was refused ({reason or f'exited {exit_code}'})"})
         else:
-            delivered.append(key)
+            if exit_code:
+                # The turn ran and then failed or was interrupted: the prompt is
+                # already in the session, so sending it again would duplicate it.
+                reports.append({**entry, "outcome": f"delivery_uncertain: the turn exited {exit_code}; check the conversation before resending"})
+            if not item.get("live"):
+                settled.append(key)
 
         pending.pop(key, None)
 
     state["pending"] = pending
-    return delivered, refused
+    return settled, reports
+
+
+def _ledger(seen: dict[str, None], entries: list[dict[str, str]]) -> list[str]:
+    """The dedupe keys to keep: the newest 500, and every key still in the outbox.
+
+    An entry stays in the outbox until everything before it settles, and only
+    this ledger stops it being sent again meanwhile.
+    """
+    keep = {_entry_key(entry) for entry in entries if not entry.get("live")}
+    keys = list(seen)
+    return [key for index, key in enumerate(keys) if index >= len(keys) - 500 or key in keep]
+
+
+def _one_shot(state: dict[str, Any], key: str, entry: dict[str, str], provider: str, verdict: dict[str, Any], sent: str) -> str:
+    """The outcome of a detached one-shot turn, journaled while it runs."""
+    if verdict.get("ok") is False:
+        if verdict.get("refused"):
+            return f"failed: the CLI turn was refused ({verdict.get('reason')})"
+        # The turn took the prompt and then failed: never send it again.
+        state["control_error"] = f"delivery_uncertain: the turn {verdict.get('reason')}; check the conversation before resending"
+        return state["control_error"]
+    if verdict.get("ok") is None:
+        # Still running: journal it and do NOT ack it. A reply is not
+        # delivered until the child has been seen to finish.
+        state.setdefault("pending", {})[key] = {
+            "pid": verdict.get("pid"),
+            "log": str(verdict.get("log_path") or ""),
+            "exit": verdict.get("exit"),
+            "completion": str(verdict.get("completion_path") or ""),
+            "seq": entry["seq"],
+            "kind": entry["kind"],
+            "provider": provider,
+            "host": entry["host"],
+            "session_id": entry["session_id"],
+            "text": entry["text"],
+            "live": bool(entry.get("live")),
+            "at": time.time(),
+        }
+        return "sent_via_cli_pending"
+    return sent
 
 
 def dispatch(
@@ -942,12 +995,14 @@ def dispatch(
 
     entries = list(entries)
     state = state if state is not None else _load_state()
-    seen = set(state.get("dispatched", []))
-    interrupted = set(state.pop("dispatching", []))
+    # Insertion order, so trimming drops the oldest keys rather than whichever
+    # sort first. Live overlay actions are never offered twice and stay out.
+    seen = dict.fromkeys(state.get("dispatched", []))
+    interrupted = state.pop("dispatching", [])
     if interrupted:
-        seen.update(interrupted)
+        seen.update(dict.fromkeys(interrupted))
         state['control_error'] = 'Delivery uncertain after bridge restart. Inspect the conversation before resending.'
-        state['dispatched'] = sorted(seen)[-500:]
+        state['dispatched'] = _ledger(seen, entries)
         _save_state(state)
     results: list[dict[str, str]] = []
 
@@ -965,9 +1020,12 @@ def dispatch(
         ]
 
     # First settle whatever the previous round left running.
-    delivered, refused_earlier = _reconcile_pending(state)
-    seen.update(delivered)
-    results.extend(refused_earlier)
+    settled_earlier, reports = _reconcile_pending(state)
+    seen.update(dict.fromkeys(settled_earlier))
+    results.extend(reports)
+    for report in reports:
+        if report["outcome"].startswith("delivery_uncertain"):
+            state["control_error"] = report["outcome"]
 
     # ...and treat what is still running as spoken for. A pending entry is not in
     # `dispatched` by design - it has not been delivered - so without this the
@@ -990,7 +1048,7 @@ def dispatch(
         if journal:
             # Persist intent before the external mutation. An interrupted call
             # remains uncertain rather than being sent again after a restart.
-            state['dispatched'] = sorted(seen)[-500:]
+            state['dispatched'] = _ledger(seen, entries)
             state['dispatching'] = [key]
             _save_state(state)
 
@@ -1030,8 +1088,9 @@ def dispatch(
         elif entry.get("kind") == "stop":
             # Persist before calling: a lost RPC response or bridge crash must
             # never cause a later turn to be interrupted by an automatic retry.
-            seen.add(key)
-            state["dispatched"] = sorted(seen)
+            if not entry.get("live"):
+                seen[key] = None
+            state["dispatched"] = _ledger(seen, entries)
             state["control_error"] = "Stop delivery uncertain; inspect Agent before trying again"
             _save_state(state)
             try:
@@ -1044,10 +1103,19 @@ def dispatch(
                 outcome = f"stop_failed_or_uncertain: {exc}; inspect Agent before trying again"
                 state["control_error"] = outcome
         elif host and host != "local":
-            sent = host_module.reply(host, entry["session_id"], entry["text"])
-            outcome = "sent_remote" if sent.get("ok") else f"{'delivery_uncertain' if sent.get('uncertain') else 'failed'}: {sent.get('error')}"
-            if sent.get('uncertain'):
-                state['control_error'] = outcome
+            # A remote turn runs for minutes; it must not hold this ledger or the
+            # overlay's other actions. It is supervised like the CLI fallback.
+            command = host_module.reply_command(host, entry["session_id"], entry["text"])
+            if command is None:
+                outcome = f"failed: unknown host {host}"
+            else:
+                try:
+                    verdict = backend.submit_reply_cli(entry["session_id"], entry["text"], command=command,
+                                                       log_dir=state_module.STATE_DIR / "replies")
+                except Exception as exc:  # noqa: BLE001 - the command could not start
+                    outcome = f"failed: {exc}"
+                else:
+                    outcome = _one_shot(state, key, entry, provider, verdict, "sent_remote")
         else:
             try:
                 if channel == "cli":
@@ -1059,27 +1127,7 @@ def dispatch(
                 except Exception as exc:  # noqa: BLE001
                     outcome = f"failed: {exc}"
                 else:
-                    if verdict.get("ok") is False:
-                        outcome = f"failed: the CLI turn was refused ({verdict.get('reason')})"
-                    elif verdict.get("ok") is None:
-                        # Still running: journal it and do NOT ack it. A reply is not
-                        # delivered until the child has been seen to finish.
-                        state.setdefault("pending", {})[key] = {
-                            "pid": verdict.get("pid"),
-                            "log": str(verdict.get("log_path") or ""),
-                            "exit": verdict.get("exit"),
-                            "completion": str(verdict.get("completion_path") or ""),
-                            "seq": entry["seq"],
-                            "kind": entry["kind"],
-                            "provider": provider,
-                            "host": entry["host"],
-                            "session_id": entry["session_id"],
-                            "text": entry["text"],
-                            "at": time.time(),
-                        }
-                        outcome = "sent_via_cli_pending"
-                    else:
-                        outcome = "sent_via_cli"
+                    outcome = _one_shot(state, key, entry, provider, verdict, "sent_via_cli")
             except Exception as exc:
                 # Acceptance may have happened before the response was lost.
                 outcome = f"delivery_uncertain: {exc}; inspect Agent before trying again"
@@ -1097,13 +1145,14 @@ def dispatch(
             results.append(record)
             continue
 
-        seen.add(key)
+        if not entry.get("live"):
+            seen[key] = None
         record = {**entry, "outcome": outcome}
         if provider_result is not None:
             record["provider_result"] = provider_result
         results.append(record)
 
-    state["dispatched"] = sorted(seen)[-500:]
+    state["dispatched"] = _ledger(seen, entries)
 
     # Only the contiguous settled prefix may be acknowledged. A failed entry
     # below a later success would otherwise be acked and dropped by the addon
@@ -1205,7 +1254,8 @@ def dispatch_live(action: dict[str, Any], *, state: dict[str, Any], channel: str
         "runtime_mode": action.get("runtime_mode"),
     }
     results = dispatch([entry], channel=channel, state=state)
-    result = results[0] if results else {"outcome": "failed: no dispatch result"}
+    # Earlier one-shot turns settled in the same call report here too.
+    result = next((item for item in results if item.get("seq") == entry["seq"]), {"outcome": "failed: no dispatch result"})
     provider_result = result.get("provider_result") if isinstance(result.get("provider_result"), dict) else {}
     outcome = str(result.get("outcome") or "")
     ok = not outcome.startswith("failed") and outcome not in {"uncertain", "skipped"} and not outcome.startswith(("stop_failed_or_uncertain", "delivery_uncertain"))
@@ -1307,12 +1357,13 @@ def _watch(
         next_launch = 0.0
         retry = 2.0
         child = None
+        game_file = state_module.StatusFile(state_module.STATE_DIR / "game-state.json")
+        watch_log = state_module.StatusFile(state_module.STATE_DIR / "gamewatch.log", volatile=("at", "next_retry_s"))
         while not stop_gamewatch.is_set():
             try:
                 changed = events.changed.is_set()
                 events.changed.clear()
                 game = tracker.sample(changed=changed)
-                state_module.atomic_write(state_module.STATE_DIR / "game-state.json", json.dumps(game))
                 try:
                     status = control.send("game-state", game=game, changed=changed)
                 except RuntimeError:
@@ -1332,13 +1383,17 @@ def _watch(
                         start_new_session=True, env=environment)
                     next_launch = time.monotonic() + max(15, retry)
                     retry = min(60, retry * 2)
-                state_module.atomic_write(state_module.STATE_DIR / "gamewatch.log", json.dumps({
+                # Diagnostics last: a full disk must not block visibility or launch.
+                game_file.write(game)
+                watch_log.write({
                     "at": time.time(), "event": "ready" if status.get("ok") else "waiting",
                     "running": game["running"], "next_retry_s": max(0, next_launch - time.monotonic()),
-                }))
+                })
             except Exception as exc:
-                state_module.atomic_write(state_module.STATE_DIR / "gamewatch.log", json.dumps({
-                    "at": time.time(), "event": "error", "error": str(exc)}))
+                try:
+                    watch_log.write({"at": time.time(), "event": "error", "error": str(exc)})
+                except OSError:
+                    pass  # a full disk must not stop game detection
             events.changed.wait(1.0)
 
     gamewatch = None
@@ -1362,7 +1417,7 @@ def _watch(
             if hermes_monitor:
                 data = hermes_monitor.enrich(data)
             if hosts_enabled:
-                data = cached_hosts(data)
+                data = remote_read_marks(cached_hosts(data), state)
             return recent_board(data, retain_ids=interests)
 
         def live_action(action: dict[str, Any]) -> dict[str, Any]:
@@ -1374,6 +1429,8 @@ def _watch(
         live_hub = live_module.LiveBridge(snapshot=live_snapshot, action=live_action, interval=0.25, idle_interval=2.0)
         live_hub.start()
 
+    # Status needs it fresher than a minute; unchanged rounds skip the write.
+    health = state_module.StatusFile(Path(health_file), volatile=("at", "provider_freshness")) if health_file else None
     while True:
         report: dict[str, Any] = {"at": time.time()}
         if live_hub is not None:
@@ -1389,16 +1446,16 @@ def _watch(
             report["publish_error"] = str(exc)
 
         def write_health():
-            if health_file is None:
+            if health is None:
                 return
             problems = [name for name in ('publish_error', 'dispatch_error') if report.get(name)]
             if data.get('error'):
                 problems.append('session_store_error')
             problems.extend(f'{name}_error' for name, status in data.get('providers', {}).items() if status == 'error')
-            state_module.atomic_write(Path(health_file), json.dumps({
+            health.write({
                 'at': time.time(), 'ok': not problems, 'problems': problems,
                 'providers': data.get('providers', {}), 'provider_freshness': data.get('provider_freshness', {}),
-            }) + '\n')
+            })
 
         write_health()
 

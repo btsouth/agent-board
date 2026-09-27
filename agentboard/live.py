@@ -8,7 +8,6 @@ the overlay on demand; actions go through the same dispatcher as in-game actions
 
 from __future__ import annotations
 
-import copy
 import json
 import os
 import socketserver
@@ -29,14 +28,14 @@ AGE_REFRESH = 30.0
 
 
 def _change_key(board: Any) -> str:
+    # Volatile fields live on the board and its rows, never inside transcripts.
     def strip(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {key: strip(item) for key, item in value.items() if key not in VOLATILE}
-        if isinstance(value, list):
-            return [strip(item) for item in value]
-        return value
+        return {key: item for key, item in value.items() if key not in VOLATILE} if isinstance(value, dict) else value
     try:
-        return json.dumps(strip(board), sort_keys=True, separators=(",", ":"), default=str)
+        stripped = strip(board)
+        if isinstance(stripped, dict) and isinstance(stripped.get("sessions"), list):
+            stripped["sessions"] = [strip(row) for row in stripped["sessions"]]
+        return json.dumps(stripped, sort_keys=True, separators=(",", ":"), default=str)
     except (TypeError, ValueError):
         return ""
 
@@ -170,12 +169,15 @@ class LiveBridge:
             return set(self._interests)
 
     def latest(self, focus: str | None = None) -> dict[str, Any]:
+        # Rows are copied for the caller; transcripts are shared rather than
+        # deep-copied on every response.
         with self._lock:
             board = self._latest if focus is None else _focus(self._latest, focus)
+            rows = board.get("sessions")
             return {
                 "revision": self._revision,
                 "at": time.time(),
-                "board": copy.deepcopy(board),
+                "board": dict(board, sessions=[dict(row) for row in rows]) if isinstance(rows, list) else dict(board),
             }
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:

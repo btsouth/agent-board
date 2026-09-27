@@ -181,6 +181,16 @@ class Runtime(unittest.TestCase):
             self.assertEqual(data['sessions'][0]['host'], 'remote')
             self.assertEqual(data['hosts']['remote'], 'ok')
 
+    def test_remote_mark_read_applies_to_the_live_board(self):
+        remote = {'id': 'session123', 'host': 'box', 'status': 'reply', 'unread': True, 'activity_at': 5.5}
+        local = dict(remote, host='local')
+        state = {'dispatched': []}
+        with patch.object(wowclient, '_save_state'):
+            self.assertTrue(wowclient.dispatch_live({'kind': 'mark_read', 'host': 'box', 'session_id': 'session123', 'text': '5.5'}, state=state)['ok'])
+        rows = wowclient.remote_read_marks({'sessions': [local, remote]}, state)['sessions']
+        self.assertIs(rows[0], local)
+        self.assertEqual((rows[1]['status'], rows[1]['unread']), ('idle', False))
+
     def test_stream_replay_does_not_duplicate_tokens(self):
         stream = hermes_live.Stream()
         batch = {'epoch': 1, 'latest_seq': 2, 'events': [{'seq': 1, 'type': 'message.start'}, {'seq': 2, 'type': 'message.delta', 'payload': {'text': 'Hello'}}]}
@@ -200,5 +210,137 @@ class Runtime(unittest.TestCase):
                 cache.read(db_path=db)
                 self.assertEqual(read.call_count, 2)
 
+    def test_live_poll_shares_transcripts_instead_of_copying_them(self):
+        conversation = [{'id': 'm', 'role': 'agent', 'text': 'reply'}]
+        t3_row = {'id': 'thread', 'provider': 't3', 'host': 'local', 'conversation': conversation}
+        provider = t3.T3Provider(); provider.start = lambda: None
+        provider._snapshot = {'connected': True, 'rows': [t3_row], 'received_at': time.time()}
+        with patch.object(t3, '_provider', provider):
+            snapshot = t3.snapshot(timeout=0)
+        snapshot['connected'] = False
+        snapshot['rows'][0]['status'] = 'changed'
+        self.assertTrue(provider._snapshot['connected'])
+        self.assertNotIn('status', t3_row)
+        self.assertIs(snapshot['rows'][0]['conversation'], conversation)
+        bridge = live.LiveBridge(snapshot=dict, action=dict, path=Path('/unused'))
+        bridge._latest = {'sessions': [t3_row]}
+        served = bridge.latest()['board']['sessions'][0]
+        served['status'] = 'changed'
+        self.assertNotIn('status', t3_row)
+        self.assertIs(served['conversation'], conversation)
+        hermes_row = {'id': 'session123', 'provider': 'hermes', 'host': 'local', 'status': 'needs', 'conversation': conversation}
+        data = {'sessions': [t3_row, hermes_row]}
+        enriched = hermes_live.enrich(data, [{'session_key': 'session123', 'status': 'working', 'open_requests': []}])
+        self.assertEqual(hermes_row['status'], 'needs')
+        self.assertEqual(enriched['sessions'][1]['status'], 'working')
+        self.assertIs(enriched['sessions'][0], t3_row)
+        with tempfile.TemporaryDirectory() as temp, patch.object(roster, 'board', return_value={'sessions': [dict(hermes_row, activity_at=1)]}):
+            cache = roster.CachedBoard()
+            first, second = cache.read(db_path=Path(temp) / 'state.db'), cache.read(db_path=Path(temp) / 'state.db')
+            first['sessions'][0]['status'] = 'changed'
+            self.assertEqual(second['sessions'][0]['status'], 'needs')
+            self.assertIs(first['sessions'][0]['conversation'], second['sessions'][0]['conversation'])
+        board = {'generated_at': 1, 'sessions': [dict(t3_row, age_s=5)]}
+        key = live._change_key(board)
+        self.assertEqual(key, live._change_key({'generated_at': 2, 'sessions': [dict(t3_row, age_s=9)]}))
+        self.assertNotEqual(key, live._change_key({'sessions': [dict(t3_row, conversation=[{'id': 'm', 'text': 'more'}])]}))
+
+    def test_status_files_skip_unchanged_writes(self):
+        from agentboard import notify, state
+        with tempfile.TemporaryDirectory() as temp:
+            clock = Mock(return_value=100.0)
+            status = state.StatusFile(Path(temp) / 'game-state.json', clock=clock)
+            self.assertTrue(status.write({'running': False, 'at': 1}))
+            clock.return_value = 110.0
+            self.assertFalse(status.write({'running': False, 'at': 2}))
+            self.assertTrue(status.write({'running': True, 'at': 3}))
+            clock.return_value = 141.0
+            self.assertTrue(status.write({'running': True, 'at': 4}))
+            self.assertEqual(json.loads((Path(temp) / 'game-state.json').read_text())['at'], 4)
+            ledger = Path(temp) / 'notify-state.json'
+            notify.save_state({'known': {'a': 'idle'}}, ledger)
+            written = ledger.stat().st_ino
+            notify.save_state({'known': {'a': 'idle'}}, ledger)
+            self.assertEqual(ledger.stat().st_ino, written)
+            notify.save_state({'known': {'a': 'reply'}}, ledger)
+            self.assertNotEqual(ledger.stat().st_ino, written)
+
+    def test_failed_cli_turn_after_submission_is_not_resent(self):
+        entry = {'seq': '7', 'kind': 'reply', 'provider': 'hermes', 'host': 'local', 'session_id': 'session123', 'text': 'continue'}
+        with tempfile.TemporaryDirectory() as temp:
+            fake = Path(temp) / 'hermes'
+            # `hermes chat --oneshot` exits 1 when a turn fails after taking the prompt.
+            fake.write_text(f'#!/bin/sh\necho started >> {temp}/launches\nexit 1\n'); fake.chmod(0o755)
+            state = {'dispatched': [], 'acked_seq': 0}
+            with patch.object(backend, 'find_backend', return_value=None), patch.object(backend, '_hermes_bin', return_value=str(fake)), \
+                 patch.object(backend, 'hermes_home', return_value=Path(temp)), patch.object(wowclient, '_save_state'):
+                first = wowclient.dispatch([entry], state=state)
+                self.assertTrue(first[0]['outcome'].startswith('delivery_uncertain'))
+                self.assertEqual(wowclient.dispatch([entry], state=state), [])
+                self.assertEqual(state['acked_seq'], 7)
+                self.assertEqual(len((Path(temp) / 'launches').read_text().splitlines()), 1)
+                # A delivered reply that quotes the marker is not a refusal.
+                fake.write_text('#!/bin/sh\necho "The log says hermes-refusal-reason: SESSION_NOT_OWNED"\n')
+                quoted = wowclient.dispatch([dict(entry, seq='8', text='what does it mean?')], state=state)
+                self.assertEqual(quoted[0]['outcome'], 'sent_via_cli')
+                fake.write_text('#!/bin/sh\necho "hermes-refusal-reason: SESSION_NOT_OWNED" >&2\nexit 1\n')
+                refused = wowclient.dispatch([dict(entry, seq='9')], state=state)
+                self.assertIn('refused (SESSION_NOT_OWNED)', refused[0]['outcome'])
+                self.assertEqual(state['acked_seq'], 8)
+
+    def test_live_result_belongs_to_its_own_action(self):
+        old = {'seq': '5', 'kind': 'reply', 'provider': 'hermes', 'host': 'local', 'session_id': 'session123', 'text': 'old'}
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / 'reply.log'; log.write_text('hermes-refusal-reason: SESSION_NOT_OWNED\n')
+            state = {'dispatched': [], 'pending': {wowclient._entry_key(old): {**old, 'pid': 0, 'exit': None, 'log': str(log), 'completion': ''}}}
+            with patch.object(wowclient, '_pid_running', return_value=False), patch.object(wowclient, '_save_state'), \
+                 patch.object(t3, 'dispatch', return_value={'ok': True, 'message': 'Approved'}):
+                result = wowclient.dispatch_live({'kind': 'approve', 'provider': 't3', 'session_id': 'thread123', 'text': 'request'}, state=state)
+        self.assertTrue(result['ok'])
+        self.assertEqual(state['pending'], {})
+
+    def test_remote_reply_runs_detached_and_uncertain_exits_are_final(self):
+        from agentboard import hosts, state as state_module
+        entry = {'seq': '3', 'kind': 'reply', 'provider': 'hermes', 'host': 'box', 'session_id': 'session123', 'text': 'hi'}
+        with tempfile.TemporaryDirectory() as temp:
+            ssh = Path(temp) / 'ssh'
+            ssh.write_text('#!/bin/sh\nsleep 2\nexit 255\n'); ssh.chmod(0o755)
+            state = {'dispatched': [], 'acked_seq': 0}
+            with patch.object(hosts, 'reply_command', return_value=[str(ssh), 'box', 'hermes chat']), \
+                 patch.object(state_module, 'STATE_DIR', Path(temp)), patch.object(wowclient, '_save_state'):
+                started = time.monotonic()
+                live_result = wowclient.dispatch_live(dict(entry, host='box', delivery='queued'), state=state)
+                self.assertLess(time.monotonic() - started, 1.9)
+                self.assertTrue(live_result['ok'] and live_result['pending'])
+                first = wowclient.dispatch([entry], state=state)
+                self.assertEqual(first[0]['outcome'], 'sent_via_cli_pending')
+                self.assertEqual(state['acked_seq'], 0)
+                deadline = time.monotonic() + 5
+                while any(backend.cli_exit(item['completion']) is None for item in state['pending'].values()) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                settled = wowclient.dispatch([entry], state=state)
+                self.assertTrue(all(item['outcome'].startswith('delivery_uncertain') for item in settled))
+                self.assertEqual(state['acked_seq'], 3)
+                self.assertEqual(state['pending'], {})
+                self.assertEqual(wowclient.dispatch([entry], state=state), [])
+
+    def test_ledger_keeps_outbox_keys_and_leaves_out_live_actions(self):
+        stuck = {'seq': '9', 'kind': 'reply', 'provider': 't3', 'host': 'local', 'session_id': 'gone-thread', 'text': 'stuck'}
+        waiting = [{'seq': str(n), 'kind': 'reply', 'provider': 't3', 'host': 'local', 'session_id': 'thread123', 'text': f'reply {n}'} for n in (10, 11)]
+        sent = []
+        def fake(action):
+            if action['session_id'] == 'gone-thread':
+                return {'ok': False, 'message': 'Session is no longer available'}
+            if action['kind'] == 'reply': sent.append(action['text'])
+            return {'ok': True}
+        state = {'dispatched': [f'{n}|old' for n in range(600)], 'acked_seq': 8}
+        with patch.object(t3, 'dispatch', side_effect=fake), patch.object(wowclient, '_save_state'):
+            wowclient.dispatch([stuck, *waiting], state=state)
+            for _ in range(3):
+                wowclient.dispatch_live({'kind': 'mark_read', 'provider': 't3', 'session_id': 'thread456', 'text': '1790000000'}, state=state)
+            wowclient.dispatch([stuck, *waiting], state=state)
+        self.assertEqual(sent, ['reply 10', 'reply 11'])
+        self.assertEqual(len(state['dispatched']), 500)
+        self.assertFalse(any('thread456' in key for key in state['dispatched']))
 
 if __name__ == '__main__': unittest.main()

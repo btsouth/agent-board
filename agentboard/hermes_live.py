@@ -1,7 +1,6 @@
 """Read-only live Hermes status and outstanding requests for the overlay."""
 from __future__ import annotations
 
-import copy
 import threading
 import time
 
@@ -78,9 +77,12 @@ def _merge_stream(conversation: list[dict], provisional: list[dict]) -> list[dic
 
 def enrich(data: dict, sessions: list[dict], streams: dict | None = None) -> dict:
     """Only real outstanding requests may become attention cards."""
-    data = copy.deepcopy(data)
+    # Copy only the rows changed below; other providers' rows are shared as is.
+    rows = [dict(row) if row.get('provider') == 'hermes' and row.get('host', 'local') == 'local' else row
+            for row in data.get('sessions', [])]
+    data = dict(data, sessions=rows)
     live = {str(item.get('session_key')): item for item in sessions}
-    for row in data.get('sessions', []):
+    for row in rows:
         if row.get('provider') != 'hermes' or row.get('host', 'local') != 'local':
             continue
         attached = live.get(row['id'])

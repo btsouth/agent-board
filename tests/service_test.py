@@ -2,6 +2,7 @@
 """A background bridge proves health without exposing sessions or racing itself."""
 import fcntl
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -40,7 +41,8 @@ class Service(unittest.TestCase):
                 self.assertTrue(health.is_file(), 'startup handshake must not wait for delivery')
                 self.assertTrue(json.loads(health.read_text())['ok'])
                 return []
-            with patch.object(wowclient, '_STATE_PATH', base / 'state.json'), patch.object(wowclient, 'board', return_value=snapshot), patch.object(wowclient, 'publish', return_value={'rows': snapshot['sessions']}), patch.object(wowclient, 'savedvars_path', return_value=base/'saved.lua'), patch.object(wowclient, 'read_outbox', return_value=[{}]), patch.object(wowclient, 'dispatch', side_effect=dispatch):
+            # Only the mocked Hermes store: never a T3 install on the test machine.
+            with patch.dict(os.environ, AGENT_BOARD_PROVIDERS='hermes'), patch.object(wowclient, '_STATE_PATH', base / 'state.json'), patch.object(wowclient, 'board', return_value=snapshot), patch.object(wowclient, 'publish', return_value={'rows': snapshot['sessions']}), patch.object(wowclient, 'savedvars_path', return_value=base/'saved.lua'), patch.object(wowclient, 'read_outbox', return_value=[{}]), patch.object(wowclient, 'dispatch', side_effect=dispatch):
                 wowclient.watch(addon_dir=base, once=True, hosts_enabled=False, notify_enabled=False, health_file=health)
             value = json.loads(health.read_text())
             self.assertEqual(set(value), {'ok', 'at', 'problems', 'providers', 'provider_freshness'})
@@ -51,7 +53,7 @@ class Service(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             health = base / 'service-health.json'
-            with patch.object(wowclient, '_STATE_PATH', base / 'state.json'), patch.object(wowclient, 'board', return_value={'sessions': []}), patch.object(wowclient, 'publish', side_effect=OSError('read only')), patch.object(wowclient, 'savedvars_path', return_value=None):
+            with patch.dict(os.environ, AGENT_BOARD_PROVIDERS='hermes'), patch.object(wowclient, '_STATE_PATH', base / 'state.json'), patch.object(wowclient, 'board', return_value={'sessions': []}), patch.object(wowclient, 'publish', side_effect=OSError('read only')), patch.object(wowclient, 'savedvars_path', return_value=None):
                 wowclient.watch(addon_dir=base, once=True, hosts_enabled=False, notify_enabled=False, health_file=health)
             self.assertFalse(json.loads(health.read_text())['ok'])
 

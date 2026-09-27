@@ -353,7 +353,7 @@ function currentLiveSocket() {
   return next
 }
 
-function liveRequest(payload, timeout = 8000) {
+function liveRequest(payload, timeout = 8000, timeoutError = 'live bridge timed out') {
   return new Promise(resolve => {
     let buffer = ''
     let settled = false
@@ -381,7 +381,7 @@ function liveRequest(payload, timeout = 8000) {
     })
     socket.on('end', () => done({ ok: false, error: 'Live bridge disconnected before confirming delivery.' }))
     socket.on('error', error => done({ ok: false, error: error.message }))
-    socket.on('timeout', () => done({ ok: false, error: 'live bridge timed out' }))
+    socket.on('timeout', () => done({ ok: false, error: timeoutError }))
   })
 }
 
@@ -430,7 +430,9 @@ async function fetchLive(wait = 0) {
 }
 
 async function liveAction(action) {
-  const response = await liveRequest({ type: 'action', action }, 40000)
+  // The bridge keeps working after we stop waiting, so a timeout is not a failure.
+  const response = await liveRequest({ type: 'action', action }, 40000,
+    'The bridge did not confirm this in time. It may still go through; check the conversation before retrying.')
   if (!response.ok) {
     return { ok: false, error: response.error || response.message || 'action failed' }
   }

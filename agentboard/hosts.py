@@ -342,16 +342,17 @@ def merge(
     return merged, status, cache
 
 
-def reply(host_name: str, session_id: str, text: str, *, timeout: float = 180.0) -> dict:
-    """Send a reply to a session that lives on another host.
+def reply_command(host_name: str, session_id: str, text: str) -> list[str] | None:
+    """The ssh command that runs a reply as a one-shot turn on another host.
 
     Uses the remote Agent CLI rather than the RPC path: the remote desktop
     backend's transport belongs to whoever is sitting at that machine, and a
-    one-shot resumed turn cannot take it away from them.
+    one-shot resumed turn cannot take it away from them. The bridge runs it
+    detached, like a local CLI fallback, because the turn can take minutes.
     """
     host = next((item for item in load_hosts() if item.name == host_name), None)
     if host is None:
-        return {"ok": False, "error": f"unknown host {host_name}"}
+        return None
 
     prefix = f"HERMES_HOME={shlex.quote(host.hermes_home)} " if host.hermes_home else ""
     # This string is run by the remote LOGIN SHELL. json.dumps escapes quotes for
@@ -363,37 +364,20 @@ def reply(host_name: str, session_id: str, text: str, *, timeout: float = 180.0)
             f"--oneshot -q {shlex.quote(text)}",
         )
     )
-
-    try:
-        proc = subprocess.run(
-            [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                # A black-holed host must not hold the watcher's round for the
-                # whole reply timeout.
-                "-o",
-                "ConnectTimeout=6",
-                "-o",
-                "ServerAliveInterval=5",
-                "-o",
-                "ServerAliveCountMax=2",
-                host.target(),
-                command,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except OSError as exc:
-        return {"ok": False, "error": str(exc)}
-    except subprocess.SubprocessError as exc:
-        return {"ok": False, "uncertain": True, "error": f"{exc}; check the remote conversation before retrying"}
-
-    if proc.returncode != 0:
-        return {"ok": False, "uncertain": True, "error": (proc.stderr or proc.stdout or "").strip()[-200:] + "; check the remote conversation before retrying"}
-
-    return {"ok": True, "host": host_name, "session": session_id, "tail": (proc.stdout or "").strip()[-120:]}
+    return [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        # A black-holed host must fail fast instead of holding the reply open.
+        "-o",
+        "ConnectTimeout=6",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=2",
+        host.target(),
+        command,
+    ]
 
 
 def status_report() -> list[dict]:

@@ -407,7 +407,11 @@ class Bridge {
   }
 
   async saveState() {
+    // Every publish saves, and almost none change anything.
+    const content = JSON.stringify(this.state);
+    if (content === this.savedState) return;
     await writeJsonAtomic(STATE_PATH, this.state);
+    this.savedState = content;
   }
 
   async connectLoop() {
