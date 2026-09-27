@@ -218,8 +218,16 @@ class Runtime(unittest.TestCase):
         with patch.object(t3, '_provider', provider):
             snapshot = t3.snapshot(timeout=0)
         snapshot['connected'] = False
+        snapshot['rows'][0]['status'] = 'changed'
         self.assertTrue(provider._snapshot['connected'])
+        self.assertNotIn('status', t3_row)
         self.assertIs(snapshot['rows'][0]['conversation'], conversation)
+        bridge = live.LiveBridge(snapshot=dict, action=dict, path=Path('/unused'))
+        bridge._latest = {'sessions': [t3_row]}
+        served = bridge.latest()['board']['sessions'][0]
+        served['status'] = 'changed'
+        self.assertNotIn('status', t3_row)
+        self.assertIs(served['conversation'], conversation)
         hermes_row = {'id': 'session123', 'provider': 'hermes', 'host': 'local', 'status': 'needs', 'conversation': conversation}
         data = {'sessions': [t3_row, hermes_row]}
         enriched = hermes_live.enrich(data, [{'session_key': 'session123', 'status': 'working', 'open_requests': []}])
@@ -271,10 +279,14 @@ class Runtime(unittest.TestCase):
                 self.assertEqual(wowclient.dispatch([entry], state=state), [])
                 self.assertEqual(state['acked_seq'], 7)
                 self.assertEqual(len((Path(temp) / 'launches').read_text().splitlines()), 1)
-                fake.write_text('#!/bin/sh\necho "hermes-refusal-reason: SESSION_NOT_OWNED"\nexit 1\n')
-                refused = wowclient.dispatch([dict(entry, seq='8')], state=state)
+                # A delivered reply that quotes the marker is not a refusal.
+                fake.write_text('#!/bin/sh\necho "The log says hermes-refusal-reason: SESSION_NOT_OWNED"\n')
+                quoted = wowclient.dispatch([dict(entry, seq='8', text='what does it mean?')], state=state)
+                self.assertEqual(quoted[0]['outcome'], 'sent_via_cli')
+                fake.write_text('#!/bin/sh\necho "hermes-refusal-reason: SESSION_NOT_OWNED" >&2\nexit 1\n')
+                refused = wowclient.dispatch([dict(entry, seq='9')], state=state)
                 self.assertIn('refused (SESSION_NOT_OWNED)', refused[0]['outcome'])
-                self.assertEqual(state['acked_seq'], 7)
+                self.assertEqual(state['acked_seq'], 8)
 
     def test_live_result_belongs_to_its_own_action(self):
         old = {'seq': '5', 'kind': 'reply', 'provider': 'hermes', 'host': 'local', 'session_id': 'session123', 'text': 'old'}

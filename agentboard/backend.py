@@ -271,15 +271,20 @@ def _tail(path: Path, limit: int = 4096) -> str:
         return ""
 
 
+REFUSAL_MARKER = "hermes-refusal-reason:"
+
+
 def refusal_reason(log_path: Path) -> str:
     """The reason a resumed turn refused the reply, if it wrote one.
 
     The CLI can exit 0 having refused (the session is owned by another window),
-    so the log is the only place that says a reply never arrived.
+    so the log is the only place that says a reply never arrived. Hermes writes
+    the marker at the start of a line; the same words inside a reply that was
+    delivered must not read as a refusal, or the reply would be sent again.
     """
     for line in _tail(log_path).splitlines():
-        if "refusal-reason:" in line:
-            return line.split("refusal-reason:", 1)[1].strip()[:120]
+        if line.startswith(REFUSAL_MARKER):
+            return line.removeprefix(REFUSAL_MARKER).strip()[:120]
     return ""
 
 

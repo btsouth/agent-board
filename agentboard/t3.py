@@ -184,9 +184,9 @@ class T3Provider:
             deadline = time.monotonic() + timeout
             while self._snapshot.get("received_at", 0.0) <= 0 and time.monotonic() < deadline:
                 self._condition.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
-            # Each publish replaces the snapshot whole, so readers can share its
-            # rows. A deep copy of every thread's transcript cost ~100 ms per poll.
-            snapshot = dict(self._snapshot)
+            # Rows are copied, transcripts shared: a deep copy of every thread's
+            # transcript cost ~100 ms per poll.
+            snapshot = dict(self._snapshot, rows=[dict(row) for row in self._snapshot.get("rows") or []])
             if time.time() - snapshot.get("received_at", 0) > 45:
                 snapshot["connected"] = False
             return snapshot

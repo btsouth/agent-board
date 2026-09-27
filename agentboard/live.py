@@ -169,14 +169,15 @@ class LiveBridge:
             return set(self._interests)
 
     def latest(self, focus: str | None = None) -> dict[str, Any]:
-        # Each poll replaces the board whole and nothing mutates it afterwards,
-        # so responses can share it instead of copying every transcript.
+        # Rows are copied for the caller; transcripts are shared rather than
+        # deep-copied on every response.
         with self._lock:
             board = self._latest if focus is None else _focus(self._latest, focus)
+            rows = board.get("sessions")
             return {
                 "revision": self._revision,
                 "at": time.time(),
-                "board": dict(board),
+                "board": dict(board, sessions=[dict(row) for row in rows]) if isinstance(rows, list) else dict(board),
             }
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:

@@ -11,7 +11,8 @@ addon and the bridge version independently and the payload is versioned by
 
 - An in-game reply sent through the CLI fallback is no longer sent again when
   its turn fails partway. Only a refusal or a command that never started is
-  retried; anything else is held as uncertain.
+  retried; anything else is held as uncertain. A delivered reply that mentions
+  Hermes's refusal marker is no longer mistaken for a refusal.
 - In-game replies waiting behind a stuck entry can no longer be sent twice
   once enough overlay actions accumulate in the dispatch ledger.
 - An overlay action no longer shows the result of an older CLI reply that
