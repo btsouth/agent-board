@@ -14,8 +14,10 @@ details that matter and are easy to miss:
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -61,3 +63,25 @@ def atomic_write(path: Path, text: str, *, mode: int = 0o600) -> None:
         pass
     finally:
         os.close(directory)
+
+
+class StatusFile:
+    """A diagnostics file rewritten when it changes, and otherwise on a slow heartbeat.
+
+    Every durable write costs two fsyncs. The game watcher's two files, written
+    once a second, measured about 23 GB of btrfs writes a day.
+    """
+
+    def __init__(self, path: Path, *, volatile=("at",), every: float = 30.0, clock=time.monotonic) -> None:
+        self.path, self.volatile, self.every, self.clock = path, set(volatile), every, clock
+        self.key: str | None = None
+        self.at = 0.0
+
+    def write(self, payload: dict) -> bool:
+        key = json.dumps({name: value for name, value in payload.items() if name not in self.volatile}, sort_keys=True)
+        now = self.clock()
+        if key == self.key and now - self.at < self.every:
+            return False
+        atomic_write(self.path, json.dumps(payload))
+        self.key, self.at = key, now
+        return True

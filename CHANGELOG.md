@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 addon and the bridge version independently and the payload is versioned by
 `schema`.
 
+## [Unreleased]
+
+### Fixed
+
+- An in-game reply sent through the CLI fallback is no longer sent again when
+  its turn fails partway. Only a refusal or a command that never started is
+  retried; anything else is held as uncertain.
+- In-game replies waiting behind a stuck entry can no longer be sent twice
+  once enough overlay actions accumulate in the dispatch ledger.
+- An overlay action no longer shows the result of an older CLI reply that
+  finished in the same call.
+- Replies to remote hosts run in the background instead of holding every other
+  overlay action for the length of the remote turn.
+- Marking a remote session read in the overlay now takes effect.
+- A timed-out overlay action says it may still go through.
+
+### Changed
+
+- The bridge no longer copies every T3 transcript on each poll. A busy board
+  costs about 7 ms per poll instead of 210 ms.
+- Game, health and notification status files are rewritten only when they
+  change, cutting idle disk writes by over 90%. The T3 provider skips
+  unchanged state saves too.
+
 ## [0.2.7] - 2026-09-26
 
 ### Fixed

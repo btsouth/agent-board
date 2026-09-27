@@ -19,6 +19,17 @@ const { writeJsonAtomic, T3RpcClient, Bridge } = context.exports
     await Promise.all(Array.from({ length: 40 }, (_, revision) => writeJsonAtomic(file, { revision })))
     assert.equal(JSON.parse(fs.readFileSync(file)).revision, 39)
     assert.equal(fs.readdirSync(temp).length, 1)
+    // Publishing saves state every time; only a change may rewrite the file.
+    context.STATE_PATH = path.join(temp, 'provider-state.json')
+    const saver = new Bridge()
+    await saver.saveState()
+    const written = fs.statSync(context.STATE_PATH).ino
+    await saver.saveState()
+    assert.equal(fs.statSync(context.STATE_PATH).ino, written)
+    saver.state.seen.thread = 1
+    await saver.saveState()
+    assert.notEqual(fs.statSync(context.STATE_PATH).ino, written)
+    assert.equal(JSON.parse(fs.readFileSync(context.STATE_PATH)).seen.thread, 1)
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
   const rpc = new T3RpcClient({}, '')
   rpc.socket = { readyState: 1, send() {}, close() {} }

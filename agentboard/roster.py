@@ -380,7 +380,6 @@ class CachedBoard:
         self.data = None
 
     def read(self, **kwargs):
-        import copy
         db = Path(kwargs.get('db_path') or hermes_home() / 'state.db')
         stamps = []
         for path in (db, Path(str(db) + '-wal')):
@@ -394,7 +393,6 @@ class CachedBoard:
         if self.data is None or key != self.key or now - self.at >= 2:
             self.data = board(**kwargs)
             self.key, self.at = key, now
-        data = copy.deepcopy(self.data)
-        for row in data.get('sessions', []):
-            row['age_s'] = max(0, int(time.time() - row['activity_at']))
-        return data
+        # Fresh rows for the ages; transcripts are shared and never modified.
+        return dict(self.data, sessions=[dict(row, age_s=max(0, int(time.time() - row['activity_at'])))
+                                         for row in self.data.get('sessions', [])])

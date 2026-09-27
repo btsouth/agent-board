@@ -166,7 +166,7 @@ def _control_and_completion_gates() -> None:
                 absent = False
             check("missing backend gives an explicit stop failure", absent and rpc.call_count == 0)
         from agentboard import hosts
-        with patch.object(hosts, "reply") as remote_reply, patch.object(backend, "stop_turn") as interrupt:
+        with patch.object(hosts, "reply_command") as remote_reply, patch.object(backend, "stop_turn") as interrupt:
             remote_state = {"dispatched": []}
             outcome = wowclient.dispatch([{**stop, "host": "remote"}], state=remote_state)
             check("remote stop never falls through to remote reply", not remote_reply.called and not interrupt.called and
@@ -187,6 +187,9 @@ def _control_and_completion_gates() -> None:
         wowclient._save_state({"dispatched": [], "acked_seq": 0})
 
         from agentboard import notify
+        # The watcher rounds below read only the mocked Hermes store, never a real T3 install.
+        providers = patch.dict(os.environ, AGENT_BOARD_PROVIDERS="hermes")
+        providers.start()
         with patch.object(wowclient, "board", return_value={"sessions": []}), \
              patch.object(notify, "transitions", side_effect=OSError("ledger disk full")), \
              patch.object(wowclient, "savedvars_path", return_value=saved), \
@@ -203,6 +206,7 @@ def _control_and_completion_gates() -> None:
             wowclient.watch(addon_dir=root, once=True, hosts_enabled=False, notify_enabled=False)
         check("watcher acknowledges previously journaled controls without repeating them", interrupt.call_count == 0 and
               wowclient._load_state()["acked_seq"] == max(int(e["seq"]) for e in controls))
+        providers.stop()
 
         # Exercise the detached supervisor with a real delayed process. No Agent
         # process is started; the shell fixture only exits after the grace window.
@@ -222,8 +226,14 @@ def _control_and_completion_gates() -> None:
         key = wowclient._entry_key(entry)
         item = {**entry, "pid": verdict["pid"], "exit": None, "log": str(verdict["log_path"]), "completion": str(verdict["completion_path"])}
         pending = {"pending": {key: item}}
-        delivered, refused = wowclient._reconcile_pending(pending)
-        check("late nonzero CLI exit is never acknowledged as delivered", backend.cli_exit(verdict["completion_path"]) == 7 and not delivered and len(refused) == 1)
+        settled, reports = wowclient._reconcile_pending(pending)
+        # The turn took the prompt before it failed, so it is neither delivered nor sent again.
+        check("late nonzero CLI exit is uncertain and never sent again", backend.cli_exit(verdict["completion_path"]) == 7 and
+              settled == [key] and reports[0]["outcome"].startswith("delivery_uncertain"))
+        Path(verdict["log_path"]).write_text("hermes-refusal-reason: SESSION_NOT_OWNED\n")
+        settled, reports = wowclient._reconcile_pending({"pending": {key: item}})
+        check("a refused CLI turn may be retried", settled == [] and "refused (SESSION_NOT_OWNED)" in reports[0]["outcome"])
+        Path(verdict["log_path"]).write_text("")
         Path(verdict["completion_path"]).write_text('{"exit": 0}')
         delivered, refused = wowclient._reconcile_pending({"pending": {key: item}})
         check("recorded zero CLI exit settles successfully", delivered == [key] and refused == [])
@@ -432,14 +442,15 @@ def _run() -> int:
         from agentboard import backend, hosts as host_module, wowclient as client
 
         routed: list[tuple] = []
-        original_reply = host_module.reply
+        original_reply = host_module.reply_command
         original_submit = backend.submit_reply
         original_submit_cli = backend.submit_reply_cli
         original_clipboard = wowclient._clipboard
         try:
-            host_module.reply = lambda host, session_id, text: routed.append(("remote", host, session_id, text)) or {"ok": True}
+            host_module.reply_command = lambda host, session_id, text: ["ssh", host, text]
             backend.submit_reply = lambda session_id, text: routed.append(("local", "-", session_id, text))
-            backend.submit_reply_cli = lambda session_id, text: routed.append(("cli", "-", session_id, text))
+            backend.submit_reply_cli = lambda session_id, text, command=None, **kwargs: routed.append(
+                ("remote", command[1], session_id, text) if command else ("cli", "-", session_id, text)) or {"ok": True}
             wowclient._clipboard = lambda text: "stub"
 
             results = wowclient.dispatch(entries, state={"dispatched": []})
@@ -457,7 +468,7 @@ def _run() -> int:
             repeat = wowclient.dispatch(entries, state={"dispatched": [wowclient._entry_key(e) for e in entries]})
             check("a dispatched entry is not sent twice", repeat == [], json.dumps(repeat))
         finally:
-            host_module.reply = original_reply
+            host_module.reply_command = original_reply
             backend.submit_reply = original_submit
             backend.submit_reply_cli = original_submit_cli
             wowclient._clipboard = original_clipboard

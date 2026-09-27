@@ -283,14 +283,26 @@ def refusal_reason(log_path: Path) -> str:
     return ""
 
 
+def not_started(reason: str, exit_code: int | None) -> bool:
+    """Whether a one-shot turn provably never took the prompt.
+
+    Only a refusal line or a command that could not start (127) proves that.
+    `hermes chat --oneshot` exits 1 for a turn that failed partway and 130 for
+    one that was interrupted, after the prompt was already in the session.
+    """
+    return bool(reason) or exit_code == 127
+
+
 def submit_reply_cli(
-    session_id: str, text: str, *, log_dir: Path | None = None, grace: float = CLI_GRACE_SECONDS
+    session_id: str, text: str, *, log_dir: Path | None = None, grace: float = CLI_GRACE_SECONDS,
+    command: list[str] | None = None,
 ) -> dict:
     """Fallback: a detached one-shot turn resumed on the stored session.
 
     Returns a verdict rather than a path: reporting a refused turn as sent is how
     a reply gets acknowledged on the wire and trimmed out of the player's outbox
-    without ever reaching the session.
+    without ever reaching the session. `command` runs another one-shot turn the
+    same way, such as the ssh command for a session on another host.
     """
     log_dir = log_dir or (hermes_home() / "logs")
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -305,7 +317,7 @@ def submit_reply_cli(
         handle.write(f"\n--- {session_id} @ {os.path.getmtime(__file__):.0f}\n".encode())
         child = subprocess.Popen(
             [sys.executable, "-c", _CLI_SUPERVISOR, str(completion_path),
-             _hermes_bin(), "chat", "-Q", "--resume", session_id, "--oneshot", "-q", text],
+             *(command or [_hermes_bin(), "chat", "-Q", "--resume", session_id, "--oneshot", "-q", text])],
             stdout=handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -330,6 +342,7 @@ def submit_reply_cli(
             "pid": child.pid,
             "exit": exit_code,
             "reason": reason or f"exited {exit_code}",
+            "refused": not_started(reason, exit_code),
         }
 
     return {

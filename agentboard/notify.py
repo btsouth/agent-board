@@ -61,7 +61,14 @@ def save_state(state: dict, path: Path | None = None) -> None:
     """Atomic: a torn ledger loses the cooldowns, which means a burst of
     duplicate notifications rather than a missed one."""
     target = path or STATE_PATH
-    state_module.atomic_write(target, json.dumps(state, indent=2, sort_keys=True))
+    text = json.dumps(state, indent=2, sort_keys=True)
+    # Most passes change nothing; skipping those saves a durable write per round.
+    try:
+        if target.read_text(encoding="utf-8") == text:
+            return
+    except (OSError, UnicodeError):
+        pass
+    state_module.atomic_write(target, text)
 
 
 def session_key(session: dict) -> str:

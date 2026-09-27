@@ -191,28 +191,8 @@ with tempfile.TemporaryDirectory() as reply_tmp:
     hosts.CONFIG_PATH = Path(reply_tmp) / "hosts.json"
     hosts.add_host("box", ssh="box")
 
-    captured = {}
-
-
-    class FakeDone:
-        returncode = 0
-        stdout = "{}"
-        stderr = ""
-
-
-    def fake_run(argv, **kwargs):
-        captured["argv"] = argv
-        return FakeDone()
-
-
-    original_run = hosts.subprocess.run
-    try:
-        hosts.subprocess.run = fake_run
-        hosts.reply("box", "sess-1", "hello $(id) `whoami` ; rm -rf /")
-    finally:
-        hosts.subprocess.run = original_run
-
-    command = captured.get("argv", ["", "", ""])[-1]
+    check("an unknown host has no reply command", hosts.reply_command("nowhere", "sess-1", "hi") is None)
+    command = hosts.reply_command("box", "sess-1", "hello $(id) `whoami` ; rm -rf /")[-1]
     # The property that matters: the shell sees the reply as ONE argument, so
     # $(...) and backticks inside it are text rather than commands.
     try:
