@@ -84,17 +84,17 @@ window.addEventListener('beforeunload', saveDraft)
 const queue = new window.MessageQueue({
   storage: localStorage,
   send: action => window.wow.action(action),
-  changed: () => queueMicrotask(() => { renderBadge(); if (selectedSession()) renderQueue(selectedSession()) })
+  changed: () => queueMicrotask(() => { window.wow.queueSessions?.(queue.items.map(item => item.action.session_id), queue.items.reduce((counts, item) => { counts[item.state] = (counts[item.state] || 0) + 1; return counts }, {})); renderBadge(); if (selectedSession()) renderQueue(selectedSession()) })
 })
 
 function renderQueue(session) {
   const items = queue.list(session)
   queueEl.hidden = items.length === 0
-  const active = queue.active(session) || items.length > 0 || !providerAvailable(session.provider)
+  const active = queue.active(session) || items.length > 0 || !providerAvailable(session)
   sendButton.textContent = session.user_input_request_id ? 'Answer' : active ? 'Queue message' : 'Send'
   sendNowButton.hidden = !active || Boolean(session.user_input_request_id)
   updateControls()
-  const key = JSON.stringify([session.id, items, busy, providerAvailable(session.provider), session.approval_request_id, session.user_input_request_id, queue.inflight.has(queue.key(session))])
+  const key = JSON.stringify([sessionKey(session), items, busy, providerAvailable(session), session.approval_request_id, session.user_input_request_id, queue.inflight.has(queue.key(session))])
   if (key === queueKey) return
   queueKey = key
   queueEl.replaceChildren()
@@ -103,7 +103,8 @@ function renderQueue(session) {
     row.className = 'queued-message'
     const text = document.createElement('div')
     text.className = 'queued-text'
-    const label = item.state === 'queued' ? 'Queued for next turn' : item.state === 'held' ? 'Needs review' : item.state === 'sending' ? 'Sending…' : item.receipt || 'Sent'
+    const waiting = !providerAvailable(session) ? 'Queued while offline' : session.approval_request_id || session.user_input_request_id ? 'Queued until you answer' : 'Queued for next turn'
+    const label = item.state === 'queued' ? waiting : item.state === 'held' ? 'Needs review' : item.state === 'sending' ? 'Sending…' : item.receipt || 'Sent'
     text.textContent = `${label}: ${item.text}`
     row.append(text)
     if (item.error) {
@@ -116,7 +117,7 @@ function renderQueue(session) {
       const now = document.createElement('button')
       now.className = 'button quiet'
       now.textContent = item.state === 'held' ? 'Retry now' : 'Send now'
-      now.disabled = busy || !providerAvailable(session.provider) || Boolean(session.approval_request_id || session.user_input_request_id) || queue.inflight.has(queue.key(session))
+      now.disabled = busy || !providerAvailable(session) || Boolean(session.approval_request_id || session.user_input_request_id) || queue.inflight.has(queue.key(session))
       now.addEventListener('click', () => void queue.sendNow(item.id, session))
       const edit = document.createElement('button')
       edit.className = 'button quiet'
@@ -209,11 +210,11 @@ function rowStatus(session) {
 let autoReadTimer = null
 function scheduleAutoRead(session) {
   clearTimeout(autoReadTimer)
-  if (!session || mode !== 'board' || !providerAvailable(session.provider)) return
+  if (!session || mode !== 'board' || !providerAvailable(session)) return
   if (!hasNews(session) || !(session.capabilities || []).includes('mark_read')) return
   autoReadTimer = setTimeout(() => {
     const current = selectedSession()
-    if (!current || current.id !== session.id || mode !== 'board' || document.hidden || !providerAvailable(session.provider)) return
+    if (!current || sessionKey(current) !== sessionKey(session) || mode !== 'board' || document.hidden || !providerAvailable(session)) return
     if (conversationEl.scrollHeight - conversationEl.clientHeight - conversationEl.scrollTop >= 60) return
     void safeAction({ kind: 'mark_read', provider: session.provider, host: session.host || 'local', session_id: session.id, text: String(session.activity_at || '') })
   }, 1500)
@@ -227,8 +228,13 @@ function visibleSessions() {
       Number(right.activity_at || 0) - Number(left.activity_at || 0))
 }
 
+function sessionKey(session) {
+  if (!session) return null
+  return session.host && session.host !== 'local' ? JSON.stringify([session.host, session.provider, session.id]) : session.id
+}
+
 function selectedSession() {
-  return (board.sessions || []).find(session => session.id === selectedId) || selectedCache
+  return (board.sessions || []).find(session => sessionKey(session) === selectedId) || selectedCache
 }
 
 let lastBadgeScore = null
@@ -277,7 +283,7 @@ function renderRows() {
   const sessions = visibleSessions()
   // A roster update arrives several times a second while agents run; rebuilding
   // identical rows would reset hover and focus for nothing.
-  const key = JSON.stringify([search, selectedId, sessions.map(session => [session.id, session.status, session.title, session.activity,
+  const key = JSON.stringify([search, selectedId, sessions.map(session => [sessionKey(session), session.host_offline, session.status, session.title, session.activity,
     session.age_s < 60 ? 0 : Math.floor(session.age_s / 60), session.approval_request_id, session.user_input_request_id, session.project,
     session.unread, session.snippet, session.source, session.provider_label, session.status_label, sessionGroup(session)])])
   if (key === rowsKey && (selectedId || !sessions.length)) return
@@ -289,7 +295,7 @@ function renderRows() {
   emptyEl.textContent = search ? 'No sessions match your search.' : 'No active or recent sessions.'
 
   if (!selectedId && sessions.length) {
-    selectedId = sessions[0].id
+    selectedId = sessionKey(sessions[0])
     selectedCache = sessions[0]
     composerInput.value = drafts.get(selectedId) || ''
   }
@@ -310,19 +316,19 @@ function renderRows() {
       rowsEl.append(heading)
     }
     const row = document.createElement('div')
-    row.dataset.id = session.id
-    row.tabIndex = session.id === selectedId || !sessions.some(item => item.id === selectedId) && session === sessions[0] ? 0 : -1
+    row.dataset.id = sessionKey(session)
+    row.tabIndex = sessionKey(session) === selectedId || !sessions.some(item => sessionKey(item) === selectedId) && session === sessions[0] ? 0 : -1
     row.addEventListener('keydown', event => {
-      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSession(session.id, true) }
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectSession(sessionKey(session), true) }
       if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
         event.preventDefault()
         const box = row.getBoundingClientRect()
-        openRowMenu(session.id, box.left + 24, box.bottom - 6)
+        openRowMenu(sessionKey(session), box.left + 24, box.bottom - 6)
       }
     })
-    row.className = `row ${group}${session.id === selectedId ? ' selected' : ''}`
+    row.className = `row ${group}${sessionKey(session) === selectedId ? ' selected' : ''}`
     row.setAttribute('role', 'option')
-    row.setAttribute('aria-selected', session.id === selectedId ? 'true' : 'false')
+    row.setAttribute('aria-selected', sessionKey(session) === selectedId ? 'true' : 'false')
 
     const dot = document.createElement('i')
     dot.className = `dot ${session.status}`
@@ -369,10 +375,10 @@ function renderRows() {
     rowAge.textContent = age(session.age_s)
 
     row.append(dot, main, rowAge)
-    row.addEventListener('click', () => selectSession(session.id, true))
+    row.addEventListener('click', () => selectSession(sessionKey(session), true))
     row.addEventListener('contextmenu', event => {
       event.preventDefault()
-      openRowMenu(session.id, event.clientX, event.clientY)
+      openRowMenu(sessionKey(session), event.clientX, event.clientY)
     })
     rowsEl.append(row)
   }
@@ -387,7 +393,7 @@ function conversationMessages(session) {
   if (!messages.length && session.preview) {
     messages.push({ role: 'agent', text: session.preview, created_at: '' })
   }
-  for (const message of pendingMessages.get(session.id) || []) {
+  for (const message of pendingMessages.get(sessionKey(session)) || []) {
     const alreadyVisible = messages.some(item => item.role === 'user' && item.text === message.text)
     if (!alreadyVisible) messages.push(message)
   }
@@ -514,7 +520,7 @@ function updateStepsNode(wrap, item) {
 function renderConversation(session) {
   const messages = displayItems(conversationMessages(session))
   const running = ['working', 'waiting', 'starting'].includes(session.status)
-  const key = JSON.stringify([session.id, Array.isArray(session.conversation), providerLabel(session), messages, running, providerAvailable(session.provider), running && session.activity])
+  const key = JSON.stringify([sessionKey(session), Array.isArray(session.conversation), providerLabel(session), messages, running, providerAvailable(session), running && session.activity])
   if (key === conversationKey) return
   conversationKey = key
 
@@ -559,7 +565,7 @@ function renderConversation(session) {
     empty.textContent = Array.isArray(session.conversation) ? 'No messages in this session yet.' : 'Loading conversation…'
     conversationEl.append(empty)
   }
-  if (running && providerAvailable(session.provider)) {
+  if (running && providerAvailable(session)) {
     if (!workingEl || !conversationEl.contains(workingEl)) workingEl = workingIndicator(session)
     workingEl.lastChild.textContent = session.activity && session.activity !== session.status_label ? session.activity : 'Working'
     conversationEl.append(workingEl)
@@ -657,14 +663,14 @@ function renderDetail({ preserveScroll = false } = {}) {
   // Opening a session with news, or watching one when its news arrives, both
   // count as reading it.
   const news = hasNews(session)
-  if (lastDetailId !== session.id || (news && !lastDetailNews)) scheduleAutoRead(session)
+  if (lastDetailId !== sessionKey(session) || (news && !lastDetailNews)) scheduleAutoRead(session)
   lastDetailNews = news
-  const changed = lastDetailId !== session.id
-  lastDetailId = session.id
+  const changed = lastDetailId !== sessionKey(session)
+  lastDetailId = sessionKey(session)
   const grew = conversationEl.scrollHeight !== lastScrollHeight
   cancelAnimationFrame(scrollFrame)
   scrollFrame = requestAnimationFrame(() => {
-    if (selectedId !== session.id) return
+    if (selectedId !== sessionKey(session)) return
     if (changed || !preserveScroll || nearBottom) {
       conversationEl.scrollTop = conversationEl.scrollHeight
       jumpLatest.hidden = true
@@ -691,11 +697,11 @@ function rowMenuItems(session) {
   const running = ['working', 'waiting', 'starting'].includes(session.status)
   const unread = hasNews(session)
   const done = doneAction(session)
-  const items = [{ label: 'Open', run: () => selectSession(session.id, true) }, 'separator']
+  const items = [{ label: 'Open', run: () => selectSession(sessionKey(session), true) }, 'separator']
   if (unread && can('mark_read')) items.push({ label: 'Mark read', run: act('mark_read') })
   else if (!running && can('mark_unread')) items.push({ label: 'Mark unread', run: act('mark_unread') })
   // E acts on the open session, so the hint only belongs to that one.
-  if (done) items.push({ label: done.label, hint: session.id === selectedId ? 'E' : '', run: act(done.kind) })
+  if (done) items.push({ label: done.label, hint: sessionKey(session) === selectedId ? 'E' : '', run: act(done.kind) })
   if (running && can('stop')) items.push({ label: 'Stop turn', danger: true, run: act('stop') })
   items.push('separator')
   items.push({ label: 'Copy title', run: () => void copyText(session.title || '') })
@@ -709,8 +715,8 @@ function rowMenuItems(session) {
 }
 
 async function menuAction(session, kind) {
-  if (busy || !providerAvailable(session.provider)) { setStatus('Reconnect before using session actions.', true); return }
-  const next = kind === 'archive' && session.id === selectedId ? neighbourOf(session.id) : null
+  if (busy || !providerAvailable(session)) { setStatus('Reconnect before using session actions.', true); return }
+  const next = kind === 'archive' && sessionKey(session) === selectedId ? neighbourOf(sessionKey(session)) : null
   if (kind === 'stop') queue.hold(session)
   const result = await safeAction({ kind, provider: session.provider, host: session.host || 'local', session_id: session.id,
     text: kind === 'mark_read' ? String(session.activity_at || '') : '' })
@@ -726,7 +732,7 @@ async function menuAction(session, kind) {
 let menuReturnFocus = null
 
 function openRowMenu(id, x, y) {
-  const session = (board.sessions || []).find(item => item.id === id)
+  const session = (board.sessions || []).find(item => sessionKey(item) === id)
   if (!session) return
   menuReturnFocus = document.activeElement
   rowMenu.replaceChildren()
@@ -814,7 +820,7 @@ async function runDone() {
   const session = selectedSession()
   const done = session && doneAction(session)
   if (!done) return
-  const next = done.kind === 'archive' ? neighbourOf(session.id) : null
+  const next = done.kind === 'archive' ? neighbourOf(sessionKey(session)) : null
   const result = await runAction({ kind: done.kind, provider: session.provider, host: session.host || 'local', session_id: session.id, text: '' })
   if (result.ok) {
     setActionStatus(done.kind === 'archive' ? 'Archived.' : done.kind === 'settle' ? 'Settled in T3 Code.' : 'Back in T3 Code\'s active list.')
@@ -824,8 +830,8 @@ async function runDone() {
 
 function neighbourOf(id) {
   const sessions = visibleSessions()
-  const index = sessions.findIndex(item => item.id === id)
-  return (sessions[index + 1] || sessions[index - 1])?.id || null
+  const index = sessions.findIndex(item => sessionKey(item) === id)
+  return sessionKey(sessions[index + 1] || sessions[index - 1])
 }
 
 function renderAll() {
@@ -840,7 +846,7 @@ function selectSession(id, focusComposer = false) {
   composerInput.value = drafts.get(id) || ''
   if (selectedId !== id) setActionStatus('')
   selectedId = id
-  selectedCache = (board.sessions || []).find(session => session.id === id) || null
+  selectedCache = (board.sessions || []).find(session => sessionKey(session) === id) || null
   renderRows()
   renderDetail()
   if (focusComposer) {
@@ -872,12 +878,16 @@ function setActionStatus(text, error = false) {
 }
 
 function providerAvailable(provider) {
+  if (provider && typeof provider === 'object') {
+    if (provider.host && provider.host !== 'local') return connected && !provider.host_offline && board.hosts?.[provider.host] === 'ok'
+    provider = provider.provider
+  }
   return connected && (!board.providers?.[provider] || board.providers[provider] === 'ok')
 }
 
 function updateControls() {
   const session = selectedSession()
-  const unavailable = !session || !providerAvailable(session.provider)
+  const unavailable = !session || !providerAvailable(session)
   for (const button of [approveButton, declineButton, answerButton, markReadButton, doneButton, stopButton]) {
     button.disabled = busy || unavailable
   }
@@ -901,13 +911,13 @@ function setBusy(next) {
 async function runAction(action, { pendingText = '' } = {}) {
   const session = selectedSession()
   if (!session || busy) return { ok: false, error: 'no session selected' }
-  if (!providerAvailable(session.provider)) { setActionStatus('Provider offline. Try again after reconnecting.', true); return { ok: false } }
+  if (!providerAvailable(session)) { setActionStatus('Provider offline. Try again after reconnecting.', true); return { ok: false } }
   setBusy(true)
 
   if (pendingText) {
-    const pending = pendingMessages.get(session.id) || []
+    const pending = pendingMessages.get(sessionKey(session)) || []
     pending.push({ role: 'user', text: pendingText, pending: true })
-    pendingMessages.set(session.id, pending)
+    pendingMessages.set(sessionKey(session), pending)
     renderConversation(session)
     conversationEl.scrollTop = conversationEl.scrollHeight
   }
@@ -918,8 +928,8 @@ async function runAction(action, { pendingText = '' } = {}) {
   finally { setBusy(false) }
 
   if (!result.ok) {
-    pendingMessages.delete(session.id)
-    if (selectedId === session.id) renderConversation(session)
+    pendingMessages.delete(sessionKey(session))
+    if (selectedId === sessionKey(session)) renderConversation(session)
     const message = result.error || result.message || 'Action failed.'
     setActionStatus(message, true)
     setStatus(message, true)
@@ -927,11 +937,11 @@ async function runAction(action, { pendingText = '' } = {}) {
   }
 
   setTimeout(() => {
-    pendingMessages.delete(session.id)
-    if (selectedId === session.id) renderDetail({ preserveScroll: true })
+    pendingMessages.delete(sessionKey(session))
+    if (selectedId === sessionKey(session)) renderDetail({ preserveScroll: true })
   }, 1500)
   setActionStatus(result.pending ? 'Sent; the agent is starting.' : 'Delivered.')
-  if (selectedId === session.id) renderConversation(session)
+  if (selectedId === sessionKey(session)) renderConversation(session)
   return result
 }
 
@@ -939,7 +949,7 @@ async function sendComposer(immediate = false) {
   const session = selectedSession()
   const text = composerInput.value.trim()
   if (!session || busy || composerInput.disabled) return
-  if (immediate && !providerAvailable(session.provider)) { setActionStatus('Reconnect before sending now. Your draft is kept.', true); return }
+  if (immediate && !providerAvailable(session)) { setActionStatus('Reconnect before sending now. Your draft is kept.', true); return }
   if (!text) {
     const item = queue.list(session).find(item => ['queued', 'held'].includes(item.state))
     if (immediate && connected && item) await queue.sendNow(item.id, session)
@@ -980,8 +990,8 @@ async function sendComposer(immediate = false) {
   saveDraft()
   const result = await runAction(action, { pendingText: text })
   if (!result.ok) {
-    if (selectedId === session.id) composerInput.value = [text, composerInput.value].filter(Boolean).join('\n\n')
-    else drafts.set(session.id, [text, drafts.get(session.id)].filter(Boolean).join('\n\n'))
+    if (selectedId === sessionKey(session)) composerInput.value = [text, composerInput.value].filter(Boolean).join('\n\n')
+    else drafts.set(sessionKey(session), [text, drafts.get(sessionKey(session))].filter(Boolean).join('\n\n'))
   }
   saveDraft()
   composerInput.focus()
@@ -994,7 +1004,7 @@ async function safeAction(action) {
 
 function renderQuestions(session) {
   const questions = session.user_input_questions || []
-  const key = JSON.stringify([session.id, session.user_input_request_id, questions])
+  const key = JSON.stringify([sessionKey(session), session.user_input_request_id, questions])
   questionsEl.hidden = !questions.length
   if (key === questionsKey) return
   questionsKey = key
@@ -1118,6 +1128,7 @@ async function startNewSession() {
   newSessionStatus.textContent = 'Starting...'
   const result = await safeAction({
     kind: 'new',
+    runtime_mode: document.getElementById('new-session-permissions').value,
     provider: 't3',
     host: 'local',
     session_id: projectId,
@@ -1173,10 +1184,10 @@ async function addProject() {
 function moveSelection(delta) {
   const sessions = visibleSessions()
   if (!sessions.length) return
-  const current = Math.max(0, sessions.findIndex(session => session.id === selectedId))
+  const current = Math.max(0, sessions.findIndex(session => sessionKey(session) === selectedId))
   const next = Math.min(sessions.length - 1, Math.max(0, current + delta))
-  selectSession(sessions[next].id)
-  const row = rowsEl.querySelector(`[data-id="${CSS.escape(sessions[next].id)}"]`)
+  selectSession(sessionKey(sessions[next]))
+  const row = rowsEl.querySelector(`[data-id="${CSS.escape(sessionKey(sessions[next]))}"]`)
   row?.focus({ preventScroll: true })
   row?.scrollIntoView({ block: 'nearest' })
 }
@@ -1265,7 +1276,7 @@ document.addEventListener('keydown', event => {
 
   if (!newSessionModal.hidden) {
     if (event.key === 'Tab') {
-      const focusable = [...newSessionModal.querySelectorAll('button, textarea')].filter(el => !el.disabled && el.getClientRects().length)
+      const focusable = [...newSessionModal.querySelectorAll('button, textarea, select')].filter(el => !el.disabled && el.getClientRects().length)
       const index = focusable.indexOf(document.activeElement)
       if (event.shiftKey && index <= 0 || !event.shiftKey && index === focusable.length - 1) {
         event.preventDefault()
@@ -1324,11 +1335,11 @@ document.addEventListener('keydown', event => {
 
 window.wow.onRoster(data => {
   board = data || { sessions: [], counts: {}, projects: [] }
-  const liveSelected = (board.sessions || []).find(session => session.id === selectedId)
+  const liveSelected = (board.sessions || []).find(session => sessionKey(session) === selectedId)
   if (liveSelected) selectedCache = liveSelected
   if (!selectedId && (board.sessions || []).length) {
     selectedCache = visibleSessions()[0] || board.sessions[0]
-    selectedId = selectedCache.id
+    selectedId = sessionKey(selectedCache)
     composerInput.value = drafts.get(selectedId) || ''
   }
   renderAll()
@@ -1341,7 +1352,7 @@ window.wow.onLive(state => {
   liveStateEl.querySelector('span').textContent = connected ? 'live' : 'offline'
   if (state.error && !connected) setStatus(state.error, true)
   else if (connected) {
-    const offline = Object.entries(board.providers || {}).filter(([, status]) => status !== 'ok').map(([provider]) => provider === 't3' ? 'T3 Code' : 'Hermes')
+    const offline = Object.entries(board.providers || {}).filter(([, status]) => status !== 'ok' && status !== 'not_configured').map(([provider]) => provider === 't3' ? 'T3 Code' : 'Hermes')
     boardStatus.textContent = offline.length ? `${offline.join(', ')} unavailable. Queued messages are kept.` : 'Live connection established.'
   }
   renderBadge()
@@ -1415,3 +1426,7 @@ window.wow.onMode(({ mode: next }) => {
     requestAnimationFrame(fitBadge)
   }
 })
+
+const visibilitySelect = document.getElementById('visibility-policy')
+visibilitySelect.addEventListener('change', () => window.wow.command(visibilitySelect.value === 'paused' ? 'pause' : visibilitySelect.value))
+window.wow.onVisibility?.(data => { visibilitySelect.value = data.policy; visibilitySelect.title = data.reason })

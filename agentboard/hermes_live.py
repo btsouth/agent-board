@@ -24,8 +24,9 @@ class Stream:
     def __init__(self):
         self.last_seen = 0
         self.epoch = None
-        self.done: list[str] = []
+        self.done: list[tuple[int, str]] = []
         self.current = ''
+        self.serial = 0
 
     def apply(self, snapshot: dict) -> None:
         epoch = snapshot.get('epoch')
@@ -33,6 +34,8 @@ class Stream:
             self.__init__()
         self.epoch = epoch
         for event in snapshot.get('events') or []:
+            if int(event.get('seq') or snapshot.get('latest_seq') or 0) <= self.last_seen:
+                continue
             kind = event.get('type')
             payload = event.get('payload') or {}
             if kind == 'message.start':
@@ -50,13 +53,14 @@ class Stream:
 
     def _finish(self, text: str) -> None:
         if text.strip():
-            self.done = [*self.done, text][-STREAM_KEEP:]
+            self.done = [*self.done, (self.serial, text)][-STREAM_KEEP:]
+            self.serial += 1
         self.current = ''
 
     def messages(self) -> list[dict]:
-        rows = [{'role': 'agent', 'text': text} for text in self.done]
+        rows = [{'id': f'stream-{self.epoch}-{serial}', 'role': 'agent', 'text': text} for serial, text in self.done]
         if self.current.strip():
-            rows.append({'role': 'agent', 'text': self.current, 'streaming': True})
+            rows.append({'id': f'stream-{self.epoch}-{self.serial}', 'role': 'agent', 'text': self.current, 'streaming': True})
         return rows
 
 
@@ -68,7 +72,7 @@ def _merge_stream(conversation: list[dict], provisional: list[dict]) -> list[dic
         text = str(message.get('text') or '')
         if text.strip() in stored:
             continue
-        extra.append(dict(message, id=f'streaming-{index}', created_at=''))
+        extra.append(dict(message, id=message.get('id') or f'streaming-{index}', created_at=''))
     return [*conversation, *extra]
 
 
@@ -127,19 +131,28 @@ class Monitor:
     def stop(self):
         self._stop.set()
 
+    def session_ids(self):
+        with self._lock:
+            return tuple(str(row['session_key']) for row in self._sessions if row.get('session_key'))
+
     def enrich(self, data):
         with self._lock:
             fresh = time.monotonic() - self._updated < 10
             return enrich(data, self._sessions if fresh else [], self._streams if fresh else {})
 
     def _poll(self):
+        connection = backend.ReadConnection()
+        target = None
+        next_discovery = 0.0
         while not self._stop.is_set():
             sessions = []
             streams = dict(self._streams)
             try:
-                target = backend.find_backend()
+                if time.monotonic() >= next_discovery:
+                    target = backend.find_backend()
+                    next_discovery = time.monotonic() + 10
                 if target:
-                    sessions = backend.call('session.active_list', {}, backend=target, timeout=3).get('sessions', [])
+                    sessions = connection.call('session.active_list', {}, backend=target, timeout=3).get('sessions', [])
                     live = set()
                     for session in sessions:
                         status = session.get('status')
@@ -147,14 +160,21 @@ class Monitor:
                         if status in {'working', 'starting', 'waiting'} and key:
                             live.add(key)
                             stream = streams.setdefault(key, Stream())
-                            snapshot = backend.call('session.events.since', {
-                                'session_id': session['id'], 'last_seen': stream.last_seen,
-                            }, backend=target, timeout=3)
-                            stream.apply(snapshot)
-                            session['open_requests'] = snapshot.get('open_requests', [])
+                            try:
+                                snapshot = connection.call('session.events.since', {
+                                    'session_id': session['id'], 'last_seen': stream.last_seen,
+                                }, backend=target, timeout=1)
+                                stream.apply(snapshot)
+                                session['open_requests'] = snapshot.get('open_requests', [])
+                            except Exception:
+                                # A bad session must not erase every other live row.
+                                continue
                     # A finished turn's text is in the store now; stop carrying it.
                     streams = {key: stream for key, stream in streams.items() if key in live}
             except Exception:
+                connection.close()
+                target = None
+                next_discovery = min(next_discovery, time.monotonic() + 2)
                 sessions = []
             working = any(session.get('status') in {'working', 'starting'} for session in sessions)
             with self._lock:
@@ -163,6 +183,7 @@ class Monitor:
                 self._updated = time.monotonic()
             # Fast while a reply is streaming, relaxed otherwise.
             self._stop.wait(0.25 if working else 2)
+        connection.close()
 
 
 def respond(action):

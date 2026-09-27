@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
+
+from . import control
 from urllib.request import Request, urlopen
 
 ORIGINS = {
@@ -63,11 +66,43 @@ def _apply(root: Path, manifest: dict, lock_fd=None) -> None:
         env["AGENT_BOARD_LOCK_FD"] = str(lock_fd)
     # A fresh process imports the version just checked out, not this updater's
     # already imported setup implementation.
+    options = {key: manifest.get(key) for key in ("addon_dir", "hermes_home", "t3_home")}
     _run([manifest["python"], "-c",
-          "from agentboard.setup import configure; import sys; "
-          "configure(addon_dir=sys.argv[1], hermes_home=sys.argv[2], yes=True)",
-          manifest["addon_dir"], manifest["hermes_home"]], cwd=root, env=env,
+          "from agentboard.setup import configure; import sys,json; "
+          "configure(**json.loads(sys.argv[1]), yes=True)",
+          json.dumps(options)], cwd=root, env=env,
          pass_fds=(lock_fd,) if lock_fd is not None else ())
+
+
+def _overlay_status() -> dict:
+    try:
+        return control.send("ping")
+    except RuntimeError:
+        return {}
+
+
+def _restart_overlay(root: Path, status: dict, version: str) -> None:
+    if not status.get("ok"):
+        return
+    control.send("quit")
+    deadline = time.monotonic() + 10
+    while control.is_running():
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Overlay did not stop for the update. Close it and reopen agent-board overlay.")
+        time.sleep(0.1)
+    env = os.environ.copy()
+    policy = status.get("visibility") or ("automatic" if status.get("game_aware") else "manual")
+    env["AGENT_BOARD_VISIBILITY"] = policy
+    env["AGENT_BOARD_GAME_AWARE"] = "1" if policy == "automatic" else "0"
+    _run([str(root / "bin/agent-board"), "overlay", "--mode", status.get("mode", "badge")], cwd=root, env=env)
+    running = control.send("ping")
+    if running.get('visibility') is not None:
+        reply = control.send('pause' if policy == 'paused' else policy)
+        if not reply.get('ok'):
+            raise RuntimeError('The overlay could not restore its visibility setting.')
+    # Old releases did not expose their running version. New ones must agree.
+    if running.get("version") and running["version"] != version.removeprefix('v'):
+        raise RuntimeError("The overlay is still running a different version. Close it and reopen agent-board overlay.")
 
 
 def update(args=None) -> dict:
@@ -83,16 +118,19 @@ def _update(args=None, lock_fd=None) -> dict:
         raise RuntimeError("No managed installation found. Run agent-board setup first.")
     expected = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "agent-board/app"
     root = Path(manifest["app_root"]).resolve()
-    if root != expected.resolve() or Path(__file__).resolve().parent.parent != root:
+    if root != expected.resolve() or (Path(__file__).resolve().parent.parent != root and not getattr(args, 'managed', False)):
         raise RuntimeError("Update only supports the managed installation. Your checkout was left untouched.")
     if _git(root, "remote", "get-url", "origin") not in ORIGINS:
         raise RuntimeError("Unexpected repository origin. Nothing changed.")
     if _git(root, "status", "--porcelain", "--untracked-files=all"):
         raise RuntimeError("The managed checkout has local changes. Preserve them before updating; nothing changed.")
+    was_active = True
     try:
         _run(["systemctl", "--user", "is-active", "agent-board.service"])
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-        raise RuntimeError("The bridge is not running. Run agent-board setup to repair it before updating. " + str(exc)) from exc
+        was_active = False
+        if not getattr(args, 'managed', False):
+            raise RuntimeError("The bridge is not running. Run agent-board setup to repair it before updating. " + str(exc)) from exc
     previous = _git(root, "rev-parse", "HEAD")
     tag = release_tag(_releases())
     # Fetching a tag never changes installed files. Existing conflicting tags
@@ -100,6 +138,11 @@ def _update(args=None, lock_fd=None) -> dict:
     _git(root, "fetch", "--no-tags", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
     target = _git(root, "rev-parse", f"{tag}^{{commit}}")
     if target == previous:
+        if not was_active:
+            _apply(root, manifest, lock_fd)
+        running = _overlay_status()
+        if running.get('ok') and running.get('version') != tag.removeprefix('v'):
+            _restart_overlay(root, running, tag)
         return {"updated": False, "version": tag}
     # Never downgrade a newer versioned checkout, even if GitHub's release list
     # is stale. An untagged development checkout is not a managed release.
@@ -110,6 +153,7 @@ def _update(args=None, lock_fd=None) -> dict:
         raise RuntimeError("Installed checkout is not a versioned release. Nothing changed.")
     if tuple(map(int, current_match.groups())) >= tuple(map(int, target_match.groups())):
         return {"updated": False, "version": current_tag}
+    overlay = _overlay_status()
     try:
         _run(["systemctl", "--user", "stop", "agent-board.service"])
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -130,6 +174,10 @@ def _update(args=None, lock_fd=None) -> dict:
             raise RuntimeError(f"Update failed: {exc}. Automatic recovery also failed: {rollback}. "
                                "Run agent-board setup to repair the installation.") from exc
         raise RuntimeError(f"Update failed; the previous version was restored: {exc}") from exc
+    try:
+        _restart_overlay(root, overlay, tag)
+    except Exception as exc:
+        raise RuntimeError(f"Updated to {tag}; the bridge is running, but the overlay needs reopening: {exc}") from exc
     return {"updated": True, "version": tag}
 
 

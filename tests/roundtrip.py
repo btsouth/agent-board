@@ -175,7 +175,7 @@ def _control_and_completion_gates() -> None:
         with patch.object(backend, "submit_reply") as submit, \
              patch.object(backend, "stop_turn", return_value={"status": "interrupted"}) as interrupt:
             for corruption in (b"\xff", "broken json", '{"dispatched": {}}', '{"acked_seq": []}',
-                               '{"pending": {"x": []}}', '{"read_marks": []}'):
+                               '{"pending": {"x": []}}', '{"read_marks": []}', '{"dispatching": {}}'):
                 wowclient._STATE_PATH.write_bytes(corruption if isinstance(corruption, bytes) else corruption.encode())
                 wowclient.publish(root, {"sessions": []}, hosts_enabled=False)
                 wowclient.acked_seq()
@@ -511,7 +511,7 @@ def _run() -> int:
 
         def dead_letter(session_id, text):
             if session_id == "20260918_182123_e733d6":
-                raise RuntimeError("no channel will take this one")
+                raise backend.BackendUnavailable("no channel will take this one")
 
         two = [
             {"seq": "10", "kind": "reply", "host": "local", "session_id": "20260918_182123_e733d6", "text": "first"},
@@ -674,7 +674,7 @@ def _run() -> int:
         original_cli = backend.submit_reply_cli
         original_submit3 = backend.submit_reply
         try:
-            backend.submit_reply = lambda session_id, text: (_ for _ in ()).throw(RuntimeError("no rpc"))
+            backend.submit_reply = lambda session_id, text: (_ for _ in ()).throw(backend.BackendUnavailable("no rpc"))
             backend.submit_reply_cli = lambda session_id, text, **kwargs: {
                 "ok": None, "pid": os.getpid(), "log_path": log, "exit": None,
             }

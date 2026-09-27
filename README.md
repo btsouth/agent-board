@@ -42,7 +42,7 @@ The bridge is tested on Linux. Windows and macOS bridge hosts are not verified.
 For a managed installation:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.6/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.7/install.sh | bash
 ```
 
 The installer downloads the tagged release under
@@ -242,6 +242,33 @@ measure Blizzard's font renderer.
 
 ## Status
 
-Version `0.2.6` is a preview. The bridge and addon are tested together, but the
+Version `0.2.7` is a preview. The bridge and addon are tested together, but the
 in-game layout and provider-specific approval/input flows should be exercised in
 the target client after installation.
+
+### Runtime controls and upgrades
+
+The overlay footer offers **Automatic**, **Manual**, and **Pause until WoW exits**.
+Automatic mode follows the detected WoW window. Manual mode stays available
+without the game. Pause hides the overlay for the current game run. The same
+controls are available as `agent-board automatic`, `agent-board manual`, and
+`agent-board pause`; `agent-board show` opens the board manually.
+
+New T3 sessions offer an explicit permission choice. Existing sessions keep
+their T3 permission mode. `agent-board status` and `agent-board doctor` show the
+installed/running versions, detection state and provider freshness without
+printing conversations.
+
+For an older managed installation, especially a T3-only 0.2.6 install, use the
+new bootstrap's updater:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.7/install.sh | bash -s -- --update
+```
+
+This checks the managed checkout before changing it and keeps recovery on the
+new updater. Normal subsequent upgrades use `agent-board update`. The addon
+still needs a WoW UI reload after an update.
+
+See [runtime review and validation](docs/runtime-review-2026-09-26.md) for the
+fixed cases and measured polling work.

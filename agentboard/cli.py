@@ -139,6 +139,8 @@ def cmd_reply(args: argparse.Namespace) -> int:
 
 def cmd_overlay(args: argparse.Namespace) -> int:
     if control.is_running():
+        if os.environ.get("AGENT_BOARD_GAME_AWARE") != "1":
+            control.send("manual")
         control.send(f"mode:{args.mode or 'toggle'}")
         print("overlay already running; sent the command")
         return 0
@@ -394,6 +396,8 @@ def cmd_pin(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    from .setup import runtime_status
+    runtime_status()
     home = roster.hermes_home()
     db = home / "state.db"
     data = roster.board(limit=1000, days=3)
@@ -426,6 +430,7 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser('status', help='show installation and background bridge health')
     status.set_defaults(func=lambda args: setup.status())
     update = sub.add_parser('update', help='update a managed installation')
+    update.add_argument('--managed', action='store_true', help='use this updater to recover the managed installation')
     update.set_defaults(func=lambda args: __import__('agentboard.updater', fromlist=['command']).command(args))
 
     board = sub.add_parser("board", help="print the agent triage board")
@@ -451,7 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
     toggle.add_argument("--mode", choices=["badge", "board"], default=None)
     toggle.set_defaults(func=cmd_toggle)
 
-    for name in ("show", "hide", "quit", "ping", "refresh", "badge"):
+    for name in ("show", "hide", "quit", "ping", "refresh", "badge", "automatic", "manual", "pause"):
         cmd = sub.add_parser(name, help=f"send `{name}` to the running overlay")
         cmd.set_defaults(func=lambda _args, _name=name: _control_command(_name))
 

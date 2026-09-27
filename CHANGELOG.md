@@ -5,6 +5,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the
 addon and the bridge version independently and the payload is versioned by
 `schema`.
 
+## [0.2.7] - 2026-09-26
+
+### Fixed
+
+- WoW detection checks process ownership and window PID, follows compositor
+  events, and cancels stale placement when the game closes.
+- Manual overlays stay open independently of WoW. Automatic visibility has a
+  short exit grace period and bounded launch retries.
+- T3-only updates preserve optional provider paths. Updates restart the running
+  overlay while retaining saved drafts, queues, geometry, mode and visibility.
+- Background queues recognize fast completed turns without selecting the session.
+  Unresolved requests and queued sessions survive age and row limits.
+- Uncertain replies are held for review instead of sent again through another
+  channel. Dispatch intent is saved before sending to protect bridge restarts.
+- Unconfigured providers no longer report as failures. Remote host sessions appear
+  in the live board with separate drafts and offline handling.
+- T3 enforces Node.js 24+, bounds RPC waits, respects restart backoff, and cleans
+  up disconnected processes and pending requests. State writes are serialized.
+- Hermes stream replays ignore duplicate events and keep stable message IDs.
+
+### Added
+
+- Automatic, manual and pause-until-exit visibility controls.
+- Explicit approval or full-access permission choice for new T3 sessions.
+- Installed/running version, WoW window and provider freshness diagnostics.
+- `install.sh --update` uses the current updater to upgrade or recover older
+  managed installations, including the T3-only update bug in 0.2.6.
+
+### Changed
+
+- Reuse unchanged roster and thread data, load fewer Hermes transcripts, relax
+  idle polling, and reuse the Hermes monitor connection. Window position saves
+  use native events with a slower compositor fallback.
+
 ## [0.2.6] - 2026-09-26
 
 ### Fixed

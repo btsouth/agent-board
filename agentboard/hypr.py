@@ -160,21 +160,10 @@ def _game_target() -> dict | None:
     computing a corner of the right display.
     """
     monitors = _monitors()
-    candidates = []
-    for client in clients():
-        if not client.get("mapped", True):
-            continue
-        class_name = str(client.get("class", "")).lower()
-        title = str(client.get("title", "")).lower()
-        if any(hint in class_name for hint in DEFAULT_CLASS_HINTS):
-            continue  # never anchor to ourselves
-        is_wow = title == "world of warcraft" or title.startswith("world of warcraft ")
-        if client.get("fullscreen") or is_wow:
-            candidates.append(client)
-
-    # Prefer a true fullscreen client, then the WoW title. WoW under Wine often
-    # uses a borderless windowed surface, which Hyprland reports as fullscreen=0.
-    candidates.sort(key=lambda client: (not str(client.get("title", "")).lower().startswith("world of warcraft"), not bool(client.get("fullscreen"))))
+    from .game import processes
+    pids = processes()
+    candidates = [client for client in clients() if client.get("mapped", True) and client.get("pid") in pids]
+    candidates.sort(key=lambda client: not bool(client.get("fullscreen")))
     for client in candidates:
         index = client.get("monitor")
         monitor = next((item for item in monitors if item.get("id") == index), None)

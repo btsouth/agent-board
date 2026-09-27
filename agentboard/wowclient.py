@@ -53,7 +53,7 @@ SESSION_ID_RE = re.compile(r"[A-Za-z0-9_.-]{8,}")
 # know, so both sides can be updated independently without silent nonsense.
 PAYLOAD_TAG = "HE1"
 PAYLOAD_SCHEMA = 5
-BRIDGE_VERSION = "0.2.6"
+BRIDGE_VERSION = "0.2.7"
 
 _INSTALL_HINTS = (
     "/mnt/data/Games/World of Warcraft",
@@ -341,20 +341,43 @@ def addon_path(base: Path, name: str = ADDON_NAME) -> Path:
     return base if base.name == name else base / name
 
 
-def aggregate_board(*, limit: int = 15, days: float = 3.0) -> dict[str, Any]:
-    """Hermes + T3 rows in the normalized provider-neutral shape."""
-    data = board(limit=limit, days=days)
-    provider_status = {"hermes": "error" if data.get("error") else "ok"}
-    t3_snapshot = t3.snapshot()
-    provider_status["t3"] = "ok" if t3_snapshot.get("connected") else "offline"
-    rows = [*(data.get("sessions") or []), *(t3_snapshot.get("rows") or [])]
-    return dict(
-        data,
-        sessions=rows,
-        providers=provider_status,
-        projects=list(t3_snapshot.get("projects") or []),
-        t3_notice=str(t3_snapshot.get("notice") or ""),
-    )
+def configured_providers() -> set[str]:
+    from .roster import hermes_home
+    configured = os.environ.get("AGENT_BOARD_PROVIDERS")
+    if configured is not None:
+        return set(configured.split(',')) & {"hermes", "t3"}
+    enabled = set()
+    if (hermes_home() / "state.db").exists():
+        enabled.add("hermes")
+    home = Path(os.environ.get("T3CODE_HOME") or Path.home() / ".t3") / "userdata"
+    if (home / "state.sqlite").exists() or (home / "server-runtime.json").exists():
+        enabled.add("t3")
+    return enabled
+
+
+def aggregate_board(*, limit: int = 15, days: float = 3.0, hermes_reader=None, provider_timeout: float = 1.0) -> dict[str, Any]:
+    """Read only configured providers; unavailable optional providers are neutral."""
+    enabled = configured_providers()
+    data = (hermes_reader or board)(limit=limit, days=days) if "hermes" in enabled else {"sessions": [], "counts": {}}
+    provider_status = {"hermes": ("error" if data.get("error") else "ok") if "hermes" in enabled else "not_configured"}
+    snapshot = t3.snapshot(timeout=provider_timeout) if "t3" in enabled else {}
+    provider_status["t3"] = ("error" if snapshot.get("error") else "ok" if snapshot.get("connected") else "offline") if "t3" in enabled else "not_configured"
+    return dict(data, sessions=[*(data.get("sessions") or []), *(snapshot.get("rows") or [])],
+                providers=provider_status, projects=list(snapshot.get("projects") or []),
+                provider_freshness={"t3": snapshot.get("received_at", 0)},
+                t3_notice=str(snapshot.get("notice") or ""))
+
+
+def cached_hosts(data: dict) -> dict:
+    from . import hosts
+    configured = [host for host in hosts.load_hosts() if host.enabled]
+    cache = hosts.load_cache()
+    results = [hosts.cached_entry(cache, host.name) for host in configured]
+    for result in results:
+        if time.time() - result["at"] > 180:
+            result["ok"] = False
+    rows, status, _ = hosts.merge(data.get("sessions") or [], results, cache=cache)
+    return dict(data, sessions=rows, hosts=status)
 
 
 def recent_board(
@@ -364,13 +387,14 @@ def recent_board(
     reply_window: float = 12 * 3600,
     finished_window: float = 6 * 3600,
     limit: int = 32,
+    retain_ids=(),
 ) -> dict[str, Any]:
     """Trim the live overlay to work that is active or genuinely recent."""
     rows: list[dict[str, Any]] = []
     for row in data.get("sessions", []) or []:
         status = str(row.get("status") or "")
         age = max(0.0, _number(row.get("age_s"), 0))
-        if status in {"working", "waiting"}:
+        if row.get("id") in retain_ids or row.get("approval_request_id") or row.get("user_input_request_id") or status in {"working", "waiting", "starting"}:
             keep = True
         elif status in {"needs", "error"}:
             keep = age <= attention_window
@@ -383,8 +407,11 @@ def recent_board(
         if keep:
             rows.append(dict(row))
 
-    rows.sort(key=lambda row: _number(row.get("activity_at"), 0), reverse=True)
-    rows = rows[: max(1, limit)]
+    rows.sort(key=lambda row: (bool(row.get("id") in retain_ids or row.get("approval_request_id") or row.get("user_input_request_id")),
+                               row.get("status") in {"working", "waiting", "starting", "needs", "error"},
+                               _number(row.get("activity_at"), 0)), reverse=True)
+    pending = sum(bool(row.get("id") in retain_ids or row.get("approval_request_id") or row.get("user_input_request_id")) for row in rows)
+    rows = rows[: max(1, limit, pending)]
     counts: dict[str, int] = {}
     for row in rows:
         status = str(row.get("status") or "idle")
@@ -664,10 +691,12 @@ def _load_state() -> dict[str, Any]:
         if not isinstance(state, dict):
             raise ValueError("state must be an object")
         dispatched = state.get("dispatched", [])
+        dispatching = state.get("dispatching", [])
         ack = state.get("acked_seq", 0)
         pending = state.get("pending", {})
         marks = state.get("read_marks", {})
         if (not isinstance(dispatched, list) or any(not isinstance(key, str) for key in dispatched)
+                or not isinstance(dispatching, list) or any(not isinstance(key, str) for key in dispatching)
                 or not isinstance(ack, int) or isinstance(ack, bool) or ack < 0
                 or not isinstance(pending, dict) or not isinstance(marks, dict)):
             raise ValueError("invalid dispatch ledger fields")
@@ -756,43 +785,8 @@ def session_env() -> dict[str, str]:
 
 
 def game_running() -> bool:
-    """Whether a WoW client process is visible in this user session."""
-    wanted = {
-        "wow.exe",
-        "wowclassic.exe",
-        "wowb.exe",
-        "wowt.exe",
-        "wowclassic",
-        "wowb",
-        "wowt",
-    }
-    try:
-        processes = list(Path("/proc").iterdir())
-    except OSError:
-        return False
-    for process in processes:
-        if not process.name.isdigit():
-            continue
-        try:
-            raw = (process / "cmdline").read_bytes()
-        except OSError:
-            continue
-        arguments = [item for item in raw.decode("utf-8", "replace").split("\0") if item]
-        if not arguments:
-            continue
-        executable = arguments[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
-        if executable in wanted:
-            return True
-        # Wine keeps its own executable in argv[0] and names the Windows game in
-        # a later argument. Only search those arguments for an actual Wine host;
-        # scanning every process argument made shell scripts that merely mention
-        # WowClassic.exe look like a running game.
-        if "wine" in executable:
-            for argument in arguments[1:]:
-                name = argument.replace("\\", "/").rsplit("/", 1)[-1].lower()
-                if name in wanted:
-                    return True
-    return False
+    from .game import processes
+    return bool(processes())
 
 
 def _clipboard(text: str) -> str:
@@ -949,6 +943,12 @@ def dispatch(
     entries = list(entries)
     state = state if state is not None else _load_state()
     seen = set(state.get("dispatched", []))
+    interrupted = set(state.pop("dispatching", []))
+    if interrupted:
+        seen.update(interrupted)
+        state['control_error'] = 'Delivery uncertain after bridge restart. Inspect the conversation before resending.'
+        state['dispatched'] = sorted(seen)[-500:]
+        _save_state(state)
     results: list[dict[str, str]] = []
 
     if state.get("unreadable"):
@@ -986,6 +986,13 @@ def dispatch(
         provider = (entry.get("provider") or "hermes").strip() or "hermes"
         outcome = "sent"
         provider_result: dict[str, Any] | None = None
+        journal = entry.get('kind', 'reply') in {'reply', 'new', 'new_project', 'approve', 'decline', 'answer', 'stop'}
+        if journal:
+            # Persist intent before the external mutation. An interrupted call
+            # remains uncertain rather than being sent again after a restart.
+            state['dispatched'] = sorted(seen)[-500:]
+            state['dispatching'] = [key]
+            _save_state(state)
 
         if provider == "t3":
             result = t3.dispatch(
@@ -998,10 +1005,13 @@ def dispatch(
                     "title": entry.get("title", ""),
                     "answers": entry.get("answers"),
                     "request_id": entry.get("request_id"),
+                    "runtime_mode": entry.get("runtime_mode"),
                 }
             )
             provider_result = result
-            outcome = "sent" if result.get("ok") else f"failed: {result.get('message') or 'T3 rejected the action'}"
+            outcome = "sent" if result.get("ok") else f"{'delivery_uncertain' if result.get('uncertain') else 'failed'}: {result.get('message') or 'T3 rejected the action'}"
+            if result.get('uncertain'):
+                state['control_error'] = outcome
         # Control messages are their own kind, never inferred from the text. The
         # text form is honoured only for an entry from an addon that predates the
         # kind field: otherwise a player who replies "!focus" gets a clipboard
@@ -1035,13 +1045,15 @@ def dispatch(
                 state["control_error"] = outcome
         elif host and host != "local":
             sent = host_module.reply(host, entry["session_id"], entry["text"])
-            outcome = "sent_remote" if sent.get("ok") else f"failed: {sent.get('error')}"
+            outcome = "sent_remote" if sent.get("ok") else f"{'delivery_uncertain' if sent.get('uncertain') else 'failed'}: {sent.get('error')}"
+            if sent.get('uncertain'):
+                state['control_error'] = outcome
         else:
             try:
                 if channel == "cli":
-                    raise RuntimeError("cli channel requested")
+                    raise backend.BackendUnavailable("CLI requested")
                 backend.submit_reply(entry["session_id"], entry["text"])
-            except Exception:  # noqa: BLE001 - any RPC failure means the CLI path
+            except backend.BackendUnavailable:
                 try:
                     verdict = backend.submit_reply_cli(entry["session_id"], entry["text"])
                 except Exception as exc:  # noqa: BLE001
@@ -1068,6 +1080,13 @@ def dispatch(
                         outcome = "sent_via_cli_pending"
                     else:
                         outcome = "sent_via_cli"
+            except Exception as exc:
+                # Acceptance may have happened before the response was lost.
+                outcome = f"delivery_uncertain: {exc}; inspect Agent before trying again"
+                state["control_error"] = outcome
+
+        if journal:
+            state.pop('dispatching', None)
 
         # Failed and pending entries both stay unsettled: a failure deserves a
         # retry, and a pending one has not finished being a question.
@@ -1183,12 +1202,13 @@ def dispatch_live(action: dict[str, Any], *, state: dict[str, Any], channel: str
         "live": True,
         "answers": action.get("answers"),
         "request_id": action.get("request_id"),
+        "runtime_mode": action.get("runtime_mode"),
     }
     results = dispatch([entry], channel=channel, state=state)
     result = results[0] if results else {"outcome": "failed: no dispatch result"}
     provider_result = result.get("provider_result") if isinstance(result.get("provider_result"), dict) else {}
     outcome = str(result.get("outcome") or "")
-    ok = not outcome.startswith("failed") and outcome not in {"uncertain", "skipped"} and not outcome.startswith("stop_failed_or_uncertain")
+    ok = not outcome.startswith("failed") and outcome not in {"uncertain", "skipped"} and not outcome.startswith(("stop_failed_or_uncertain", "delivery_uncertain"))
     return {
         "ok": ok,
         "message": outcome,
@@ -1281,39 +1301,45 @@ def _watch(
         refresher.start()
 
     def _watch_game() -> None:
-        if os.environ.get("AGENT_BOARD_AUTO_OVERLAY", "1") == "0":
-            return
-        log_path = state_module.STATE_DIR / "gamewatch.log"
+        from .game import Events, Tracker
+        tracker = Tracker()
+        events = Events(stop_gamewatch)
+        next_launch = 0.0
+        retry = 2.0
+        child = None
         while not stop_gamewatch.is_set():
             try:
-                running = game_running()
-                overlay_running = control.is_running()
-                overlay_status = control.send("ping") if overlay_running else {}
-                if running and overlay_running and not overlay_status.get("game_aware"):
-                    control.send("quit")
-                    time.sleep(1.0)
-                    overlay_running = False
-                if running and not overlay_running:
+                changed = events.changed.is_set()
+                events.changed.clear()
+                game = tracker.sample(changed=changed)
+                state_module.atomic_write(state_module.STATE_DIR / "game-state.json", json.dumps(game))
+                try:
+                    status = control.send("game-state", game=game, changed=changed)
+                except RuntimeError:
+                    status = {}
+                if status.get("ok"):
+                    retry = 2.0
+                    if child is not None:
+                        child.poll()
+                        child = None
+                elif (game["running"] and os.environ.get("AGENT_BOARD_AUTO_OVERLAY", "1") != "0"
+                      and time.monotonic() >= next_launch and (child is None or child.poll() is not None)):
                     environment = session_env()
                     environment["AGENT_BOARD_GAME_AWARE"] = "1"
                     child = subprocess.Popen(
                         [str(ROOT / "bin" / "agent-board"), "overlay", "--mode", "badge"],
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                        env=environment,
-                    )
-                    state_module.atomic_write(
-                        log_path,
-                        json.dumps({"at": time.time(), "event": "launched", "pid": child.pid}) + "\n",
-                    )
-            except Exception as exc:  # noqa: BLE001 - a game detector must never kill the bridge
-                state_module.atomic_write(
-                    log_path,
-                    json.dumps({"at": time.time(), "event": "error", "error": str(exc)}) + "\n",
-                )
-            stop_gamewatch.wait(5.0)
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True, env=environment)
+                    next_launch = time.monotonic() + max(15, retry)
+                    retry = min(60, retry * 2)
+                state_module.atomic_write(state_module.STATE_DIR / "gamewatch.log", json.dumps({
+                    "at": time.time(), "event": "ready" if status.get("ok") else "waiting",
+                    "running": game["running"], "next_retry_s": max(0, next_launch - time.monotonic()),
+                }))
+            except Exception as exc:
+                state_module.atomic_write(state_module.STATE_DIR / "gamewatch.log", json.dumps({
+                    "at": time.time(), "event": "error", "error": str(exc)}))
+            events.changed.wait(1.0)
 
     gamewatch = None
     if not once and iterations is None:
@@ -1324,9 +1350,20 @@ def _watch(
     hermes_monitor = None
     if not once and iterations is None:
         from .hermes_live import Monitor
-        hermes_monitor = Monitor()
+        from .roster import CachedBoard
+        hermes_monitor = Monitor() if "hermes" in configured_providers() else None
+        cached_roster = CachedBoard()
         def live_snapshot() -> dict[str, Any]:
-            return recent_board(hermes_monitor.enrich(aggregate_board(limit=limit, days=days)))
+            interests = live_hub.interests() if live_hub else set()
+            def reader(**kwargs):
+                ids = interests | set(hermes_monitor.session_ids() if hermes_monitor else ())
+                return cached_roster.read(**kwargs, include_ids=tuple(sorted(ids)))
+            data = aggregate_board(limit=limit, days=days, hermes_reader=reader, provider_timeout=0)
+            if hermes_monitor:
+                data = hermes_monitor.enrich(data)
+            if hosts_enabled:
+                data = cached_hosts(data)
+            return recent_board(data, retain_ids=interests)
 
         def live_action(action: dict[str, Any]) -> dict[str, Any]:
             with state_lock:
@@ -1334,7 +1371,7 @@ def _watch(
 
         # A snapshot costs a few milliseconds and only a changed board wakes the
         # overlay, so a short interval is what makes streamed replies feel live.
-        live_hub = live_module.LiveBridge(snapshot=live_snapshot, action=live_action, interval=0.25)
+        live_hub = live_module.LiveBridge(snapshot=live_snapshot, action=live_action, interval=0.25, idle_interval=2.0)
         live_hub.start()
 
     while True:
@@ -1346,22 +1383,24 @@ def _watch(
 
         try:
             report["published"] = publish(
-                directory, data, hosts_enabled=hosts_enabled, host_ttl=1e9 if refresher else 120.0
+                directory, data, hosts_enabled=hosts_enabled and live_hub is None, host_ttl=1e9 if refresher else 120.0
             )
         except Exception as exc:  # noqa: BLE001
             report["publish_error"] = str(exc)
 
-        if health_file is not None:
-            problems = []
-            if report.get('publish_error'):
-                problems.append('publish_error')
-            if data.get('error') and not any(
-                row.get('provider') != 'hermes' for row in data.get('sessions', []) or []
-            ):
+        def write_health():
+            if health_file is None:
+                return
+            problems = [name for name in ('publish_error', 'dispatch_error') if report.get(name)]
+            if data.get('error'):
                 problems.append('session_store_error')
+            problems.extend(f'{name}_error' for name, status in data.get('providers', {}).items() if status == 'error')
             state_module.atomic_write(Path(health_file), json.dumps({
                 'at': time.time(), 'ok': not problems, 'problems': problems,
+                'providers': data.get('providers', {}), 'provider_freshness': data.get('provider_freshness', {}),
             }) + '\n')
+
+        write_health()
 
         if notify_enabled:
             # Notify from what was PUBLISHED, which includes the merged remote
@@ -1389,13 +1428,7 @@ def _watch(
                     report["dispatch_error"] = str(exc)
             report["outbox"] = len(entries)
 
-        if health_file is not None:
-            problems = [name for name in ('publish_error', 'dispatch_error') if report.get(name)]
-            if data.get('error'):
-                problems.append('session_store_error')
-            state_module.atomic_write(Path(health_file), json.dumps({
-                'at': time.time(), 'ok': not problems, 'problems': problems,
-            }) + '\n')
+        write_health()
 
         if once or iterations is not None:
             reports.append(report)

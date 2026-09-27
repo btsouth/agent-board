@@ -239,7 +239,7 @@ def _bucket(
     return "finished" if ended else "idle"
 
 
-def board(*, limit: int = 25, days: float = 7.0, db_path: Path | None = None) -> dict[str, Any]:
+def board(*, limit: int = 25, days: float = 7.0, db_path: Path | None = None, include_ids=()) -> dict[str, Any]:
     """The triage board: recent sessions, statuses resolved, sorted by urgency."""
     db = db_path or (hermes_home() / "state.db")
     now = time.time()
@@ -262,12 +262,12 @@ def board(*, limit: int = 25, days: float = 7.0, db_path: Path | None = None) ->
     # ten seconds forever, and an early return that leaked one descriptor per call
     # ran the process out of them inside an hour.
     try:
-        return _board_from(conn, limit=limit, now=now, cutoff=cutoff)
+        return _board_from(conn, limit=limit, now=now, cutoff=cutoff, include_ids=include_ids)
     finally:
         conn.close()
 
 
-def _board_from(conn: sqlite3.Connection, *, limit: int, now: float, cutoff: float) -> dict[str, Any]:
+def _board_from(conn: sqlite3.Connection, *, limit: int, now: float, cutoff: float, include_ids=()) -> dict[str, Any]:
     try:
         leases = _live_leases(conn, now)
         delegating_ids = _running_delegations(conn, now)
@@ -275,18 +275,20 @@ def _board_from(conn: sqlite3.Connection, *, limit: int, now: float, cutoff: flo
         return {"error": f"cannot read the session store: {exc}", "sessions": [], "counts": {}}
 
     try:
+        include_ids = tuple(dict.fromkeys((*include_ids, *leases)))
+        placeholders = ','.join('?' for _ in include_ids) or 'NULL'
         rows = conn.execute(
-            """
+            f"""
             select id, title, source, profile_name, cwd, git_repo_root, started_at, ended_at,
                    end_reason, last_activity_at, last_read_at, message_count,
                    estimated_cost_usd, last_activity_description
             from sessions
             where coalesce(hidden, 0) = 0 and coalesce(archived, 0) = 0
-              and coalesce(last_activity_at, started_at) > ?
-            order by coalesce(last_activity_at, started_at) desc
+              and (coalesce(last_activity_at, started_at) > ? or id in ({placeholders}))
+            order by (id in ({placeholders})) desc, coalesce(last_activity_at, started_at) desc
             limit ?
             """,
-            (cutoff, max(limit * 3, 60)),
+            (cutoff, *include_ids, *include_ids, max(limit * 3, 60, len(include_ids))),
         ).fetchall()
     except sqlite3.Error as exc:
         # An older or foreign store may lack a column this query names. The
@@ -346,10 +348,12 @@ def _board_from(conn: sqlite3.Connection, *, limit: int, now: float, cutoff: flo
                     "cost_usd": round(float(row["estimated_cost_usd"] or 0), 4),
                     "preview": text.strip().replace("\n", " ")[:180],
                     "snippet": _snippet(text) if role == "assistant" else "",
-                    "conversation": _conversation(conn, sid),
                     "capabilities": ["reply", "focus", "mark_read", "mark_unread", "stop", "archive"],
                 }
             )
+        sessions.sort(key=lambda row: (row["id"] not in include_ids, STATUS_ORDER.get(row["status"], 9), row["age_s"]))
+        for row in sessions[:max(limit, len(include_ids))]:
+            row["conversation"] = _conversation(conn, row["id"])
     finally:
         conn.close()
 
@@ -359,10 +363,38 @@ def _board_from(conn: sqlite3.Connection, *, limit: int, now: float, cutoff: flo
     for session in sessions:
         counts[session["status"]] = counts.get(session["status"], 0) + 1
 
-    trimmed = sessions[:limit]
+    trimmed = [row for row in sessions if "conversation" in row]
     return {
         "generated_at": now,
         "counts": counts,
         "attention": counts.get("needs", 0) + counts.get("error", 0),
         "sessions": trimmed,
     }
+
+
+class CachedBoard:
+    """Reuse unchanged SQLite snapshots, with a bounded refresh for lease expiry."""
+    def __init__(self):
+        self.key = None
+        self.at = 0.0
+        self.data = None
+
+    def read(self, **kwargs):
+        import copy
+        db = Path(kwargs.get('db_path') or hermes_home() / 'state.db')
+        stamps = []
+        for path in (db, Path(str(db) + '-wal')):
+            try:
+                stat = path.stat()
+                stamps.append((stat.st_ino, stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                stamps.append(None)
+        key = (str(db), tuple(stamps), repr(kwargs))
+        now = time.monotonic()
+        if self.data is None or key != self.key or now - self.at >= 2:
+            self.data = board(**kwargs)
+            self.key, self.at = key, now
+        data = copy.deepcopy(self.data)
+        for row in data.get('sessions', []):
+            row['age_s'] = max(0, int(time.time() - row['activity_at']))
+        return data

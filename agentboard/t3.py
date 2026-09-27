@@ -32,21 +32,18 @@ STATE_DIR = state_module.STATE_DIR
 
 
 def _node_binary() -> str | None:
-    candidates = [Path("/usr/bin/node"), Path.home() / ".local/share/mise/shims/node"]
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            try:
-                result = subprocess.run(
-                    [str(candidate), "-p", "process.versions.node"],
-                    capture_output=True,
-                    text=True,
-                    timeout=3,
-                )
-            except (OSError, subprocess.SubprocessError):
-                continue
-            if result.returncode == 0:
-                return str(candidate)
-    return shutil.which("node")
+    candidates = ["/usr/bin/node", str(Path.home() / ".local/share/mise/shims/node"), shutil.which("node")]
+    for candidate in dict.fromkeys(candidates):
+        if not candidate:
+            continue
+        try:
+            result = subprocess.run([candidate, "-p", "process.versions.node"],
+                                    capture_output=True, text=True, timeout=3)
+            if result.returncode == 0 and int(result.stdout.strip().split('.')[0]) >= 24:
+                return candidate
+        except (OSError, ValueError, subprocess.SubprocessError):
+            continue
+    return None
 
 
 class T3Provider:
@@ -57,6 +54,7 @@ class T3Provider:
         self._threads: list[threading.Thread] = []
         self._stop = threading.Event()
         self._condition = threading.Condition()
+        self._write_lock = threading.Lock()
         self._pending: dict[str, dict[str, Any]] = {}
         self._snapshot: dict[str, Any] = {
             "connected": False,
@@ -67,11 +65,18 @@ class T3Provider:
         }
         self._next_id = 1
         self._restart_delay = 2.0
+        self._next_start = 0.0
 
     def start(self) -> None:
         with self._condition:
+            if self._stop.is_set() or time.monotonic() < self._next_start:
+                return
             if self._process and self._process.poll() is None:
                 return
+            if any(thread.is_alive() for thread in self._threads):
+                return
+            self._threads = []
+            self._next_start = time.monotonic() + self._restart_delay
             node = _node_binary()
             if not node:
                 self._snapshot["notice"] = "T3 provider requires Node.js 24 or newer."
@@ -82,18 +87,23 @@ class T3Provider:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
             log = LOG_PATH.open("ab", buffering=0)
             self._log = log
-            self._process = subprocess.Popen(
-                [node, str(PROVIDER), "--jsonl", "--t3-home", str(self.t3_home)],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=log,
-                text=True,
-                bufsize=1,
-                start_new_session=True,
-            )
-            thread = threading.Thread(target=self._read_stdout, name="t3-provider-stdout", daemon=True)
-            thread.start()
+            try:
+                self._process = subprocess.Popen(
+                    [node, str(PROVIDER), "--jsonl", "--t3-home", str(self.t3_home)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=log,
+                    text=True,
+                    bufsize=1,
+                    start_new_session=True,
+                )
+            except OSError:
+                log.close()
+                self._restart_delay = min(30.0, self._restart_delay * 2)
+                raise
+            thread = threading.Thread(target=self._read_stdout, args=(self._process, log), name="t3-provider-stdout", daemon=True)
             self._threads.append(thread)
+            thread.start()
 
     def stop(self) -> None:
         self._stop.set()
@@ -105,8 +115,7 @@ class T3Provider:
             except subprocess.TimeoutExpired:
                 process.kill()
 
-    def _read_stdout(self) -> None:
-        process = self._process
+    def _read_stdout(self, process, log) -> None:
         if process is None or process.stdout is None:
             return
         try:
@@ -115,16 +124,20 @@ class T3Provider:
                     message = json.loads(line)
                 except (TypeError, ValueError):
                     continue
+                if not isinstance(message, dict):
+                    continue
                 if message.get("type") == "snapshot":
                     with self._condition:
                         self._snapshot = {
                             "connected": bool(message.get("connected")),
                             "notice": str(message.get("notice") or ""),
+                            "error": str(message.get("error") or ""),
                             "rows": list(message.get("rows") or []),
                             "projects": list(message.get("projects") or []),
                             "received_at": time.time(),
                         }
-                        self._restart_delay = 2.0
+                        if message.get("connected"):
+                            self._restart_delay = 2.0
                         self._condition.notify_all()
                 elif message.get("type") == "result":
                     request_id = str(message.get("id") or "")
@@ -137,6 +150,7 @@ class T3Provider:
                                 "thread_id": message.get("threadId") or message.get("thread_id"),
                                 "project_id": message.get("projectId") or message.get("project_id"),
                                 "message_id": message.get("messageId"),
+                                "uncertain": bool(message.get("uncertain")),
                             }
                             self._condition.notify_all()
         finally:
@@ -147,12 +161,22 @@ class T3Provider:
                     "notice": self._snapshot.get("notice") or "T3 provider disconnected.",
                 }
                 for pending in self._pending.values():
-                    pending["result"] = {"ok": False, "message": "T3 provider disconnected."}
+                    pending["result"] = {"ok": False, "message": "T3 provider disconnected. Check delivery before retrying.", "uncertain": True}
                 self._condition.notify_all()
-            if not self._stop.is_set():
-                time.sleep(self._restart_delay)
+                self._pending.clear()
+                self._next_start = time.monotonic() + self._restart_delay
                 self._restart_delay = min(30.0, self._restart_delay * 2)
-                self.start()
+            log.close()
+            process.stdout.close()
+            if process.stdin:
+                process.stdin.close()
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
     def snapshot(self, *, timeout: float = 1.0) -> dict[str, Any]:
         self.start()
@@ -160,7 +184,11 @@ class T3Provider:
             deadline = time.monotonic() + timeout
             while self._snapshot.get("received_at", 0.0) <= 0 and time.monotonic() < deadline:
                 self._condition.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
-            return json.loads(json.dumps(self._snapshot))
+            import copy
+            snapshot = copy.deepcopy(self._snapshot)
+            if time.time() - snapshot.get("received_at", 0) > 45:
+                snapshot["connected"] = False
+            return snapshot
 
     def dispatch(self, action: dict[str, Any], *, timeout: float = 35.0) -> dict[str, Any]:
         if action.get("kind") == "focus":
@@ -194,14 +222,15 @@ class T3Provider:
         with self._condition:
             self._pending[request_id] = record
         try:
-            process.stdin.write(
-                json.dumps({"id": request_id, "action": action}, separators=(",", ":")) + "\n"
-            )
-            process.stdin.flush()
+            with self._write_lock:
+                process.stdin.write(
+                    json.dumps({"id": request_id, "action": action}, separators=(",", ":")) + "\n"
+                )
+                process.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             with self._condition:
                 self._pending.pop(request_id, None)
-            return {"ok": False, "message": f"T3 provider write failed: {exc}"}
+            return {"ok": False, "message": f"T3 provider write failed: {exc}", "uncertain": True}
 
         deadline = time.monotonic() + timeout
         with self._condition:
@@ -209,7 +238,7 @@ class T3Provider:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._pending.pop(request_id, None)
-                    return {"ok": False, "message": "T3 provider did not answer in time."}
+                    return {"ok": False, "message": "T3 provider did not answer in time. Check delivery before retrying.", "uncertain": True}
                 self._condition.wait(timeout=min(remaining, 1.0))
             return dict(record["result"])
 

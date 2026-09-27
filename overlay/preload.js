@@ -5,6 +5,8 @@ const { contextBridge, ipcRenderer } = require('electron')
 // The renderer is a view: it can read the roster, ask for a reply, and send a
 // window command. It gets no Node, no filesystem, and no agent credentials.
 contextBridge.exposeInMainWorld('wow', {
+  onVisibility: callback => ipcRenderer.on('wow:visibility', (_event, data) => callback(data)),
+  queueSessions: (sessions, summary) => ipcRenderer.send('wow:queue-sessions', sessions, summary),
   onRoster: callback => ipcRenderer.on('wow:roster', (_event, data) => callback(data)),
   onMode: callback => ipcRenderer.on('wow:mode', (_event, data) => {
     callback(data)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Pin the bootstrap to the release whose setup contract this script knows.
 set -euo pipefail
-VERSION=v0.2.6
+VERSION=v0.2.7
 REPOSITORY=https://github.com/btsouth/agent-board.git
 
 fail() { printf 'AgentBoard setup: %s\n' "$*" >&2; exit 1; }
@@ -9,8 +9,15 @@ if [[ ${1:-} == --help ]]; then
   printf '%s\n' 'Install Agent Board and its background bridge for your Linux login.' \
     'Requires T3 Code and/or Hermes, Python 3.10+, git and a systemd user session.' \
     'T3 Code also requires Node.js 24 or newer.' \
-    'Usage: bash install.sh [--hermes-home PATH] [--addon-dir PATH] [--yes]'
+    'Usage: bash install.sh [--hermes-home PATH] [--addon-dir PATH] [--yes]' \
+    'Upgrade or recover an older managed install: bash install.sh --update'
   exit 0
+fi
+updating=0
+if [[ ${1:-} == --update ]]; then
+  updating=1
+  shift
+  [[ $# == 0 ]] || fail '--update takes no setup arguments.'
 fi
 [[ $(uname -s) == Linux ]] || fail 'Automatic setup currently supports Linux only.'
 for program in git python3 systemctl; do
@@ -35,6 +42,15 @@ if [[ -e $app ]]; then
   [[ -d $app/.git && -x $app/bin/agent-board ]] || fail "An unrelated directory already exists at $app; it was left untouched."
   origin=$(git -C "$app" remote get-url origin)
   [[ $origin == "$REPOSITORY" ]] || fail "The existing checkout has a different origin; it was left untouched."
+  if [[ $updating == 1 ]]; then
+    # Use this release's updater, including its recovery fixes. The old updater
+    # may be exactly what needs repair. The managed checkout stays untouched
+    # until the new updater has checked ownership, origin and local changes.
+    work=$(mktemp -d "$base/.download.XXXXXX")
+    git clone --quiet --depth 1 --branch "$VERSION" "$REPOSITORY" "$work/app" || fail 'Download failed; installation was not changed.'
+    "$work/app/bin/agent-board" update --managed
+    exit $?
+  fi
   printf 'Using your existing AgentBoard installation. Run agent-board update to update it.\n'
 else
   printf 'Downloading AgentBoard %s...\n' "$VERSION"

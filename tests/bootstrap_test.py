@@ -28,7 +28,7 @@ import os,sys,json
 args=sys.argv[1:]
 if args[0] == 'clone':
     if os.environ.get('FAIL_DOWNLOAD'): sys.exit(7)
-    assert args[:6] == ['clone','--quiet','--depth','1','--branch','v0.2.6'],args
+    assert args[:6] == ['clone','--quiet','--depth','1','--branch','v0.2.7'],args
     assert args[6] == 'https://github.com/btsouth/agent-board.git',args
     target=Path(args[-1]); (target/'.git').mkdir(parents=True); (target/'bin').mkdir()
     launcher=target/'bin/agent-board'
@@ -59,6 +59,9 @@ else: sys.exit(8)
     (app / "retained.txt").write_text("personal edit")
     repeated = run("--yes")
     check("rerunning setup preserves the existing checkout", repeated.returncode == 0 and (app / "retained.txt").read_text() == "personal edit")
+    upgraded = run("--update")
+    check("release bootstrap can run the new updater against an older installation", upgraded.returncode == 0 and json.loads(capture.read_text()) == ["update", "--managed"])
+    check("upgrade bootstrap preserves existing files", (app / "retained.txt").read_text() == "personal edit")
     refused = run("--yes", extra={"TEST_ORIGIN": "https://example.com/unrelated.git"})
     check("unrelated checkout is refused without replacement", refused.returncode != 0 and (app / "retained.txt").exists())
     failed_setup = run("--yes", extra={"SETUP_EXIT": "9"})

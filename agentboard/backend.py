@@ -25,6 +25,10 @@ from pathlib import Path
 
 from .roster import hermes_home
 
+class BackendUnavailable(RuntimeError):
+    """No backend was found, before any request was sent."""
+
+
 _SERVE_RE = re.compile(r"serve\b")
 
 
@@ -72,6 +76,11 @@ def find_backend(home: Path | None = None) -> dict[str, object] | None:
 
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != os.getuid():
+                continue
+        except OSError:
             continue
         pid = int(entry.name)
         cmdline = _proc_cmdline(pid)
@@ -178,7 +187,7 @@ def _runtime_session_id(session_id: str, *, backend: dict[str, object]) -> str:
 def submit_reply(session_id: str, text: str, *, backend: dict[str, object] | None = None, delivery: str = ""):
     backend = backend or find_backend()
     if backend is None:
-        raise RuntimeError("no running Agent backend (desktop app not open?)")
+        raise BackendUnavailable("no running Agent backend (desktop app not open?)")
     runtime_id = _runtime_session_id(session_id, backend=backend)
     if delivery == "immediate":
         snapshot = call("session.active_list", {}, backend=backend) or {}
@@ -203,7 +212,7 @@ def stop_turn(session_id: str, *, backend: dict[str, object] | None = None):
     """Interrupt only an already attached turn; resuming could start new work."""
     backend = backend or find_backend()
     if backend is None:
-        raise RuntimeError("no running Agent backend (desktop app not open?)")
+        raise BackendUnavailable("no running Agent backend (desktop app not open?)")
     snapshot = call("session.active_list", {}, backend=backend) or {}
     matches = [row for row in snapshot.get("sessions", []) or []
                if str(row.get("session_key") or "") == session_id]
@@ -331,3 +340,49 @@ def submit_reply_cli(
         "exit": exit_code,
         "reason": reason,
     }
+
+
+class ReadConnection:
+    """One private read-only monitor connection; mutations keep their own RPCs."""
+    def __init__(self):
+        self.ws = None
+        self.target = None
+        self.next_id = 0
+
+    def close(self):
+        if self.ws is not None:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+        self.ws = None
+
+    def call(self, method, params, *, backend, timeout=3):
+        if method not in {'session.active_list', 'session.events.since'}:
+            raise ValueError('monitor connection only supports reads')
+        if self.target != backend:
+            self.close()
+            self.target = dict(backend)
+        try:
+            if self.ws is None:
+                from websockets.sync.client import connect
+                from urllib.parse import urlencode
+                url = str(backend['url'])
+                if backend.get('token'):
+                    url += '?' + urlencode({'token': backend['token']})
+                self.ws = connect(url, max_size=8 * 1024 * 1024, open_timeout=timeout, close_timeout=1)
+            self.next_id += 1
+            self.ws.send(json.dumps({'jsonrpc': '2.0', 'id': self.next_id, 'method': method, 'params': params}))
+            deadline = time.monotonic() + timeout
+            for _ in range(200):
+                message = json.loads(self.ws.recv(timeout=max(0.001, deadline - time.monotonic())))
+                if message.get('id') == self.next_id:
+                    if 'error' in message:
+                        raise RuntimeError(f'{method} refused')
+                    return message.get('result') or {}
+                if time.monotonic() >= deadline:
+                    break
+            raise RuntimeError(f'{method} timed out')
+        except Exception:
+            self.close()
+            raise

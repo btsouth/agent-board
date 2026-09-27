@@ -83,6 +83,18 @@ async function main() {
     resolve({ ok: true }); await send
     assert.equal(queue.items.length, 1)
   }
+  {
+    const { queue, session, sent, update } = fixture()
+    session.status = 'finished'
+    delete session.conversation
+    session.message_receipts = []
+    const first = queue.enqueue(session, 'fast background')
+    queue.enqueue(session, 'next background')
+    await update()
+    session.message_receipts = [{ id: 'u', role: 'user', digest: first.digest }, { id: 'a', role: 'agent' }]
+    await update(); await update()
+    assert.equal(sent.length, 2, 'background fast-turn receipts release the next message')
+  }
   console.log('Message queue: FIFO, send now, approvals, stop, reconnect, restart, duplicate text, fast turns, in-flight races passed')
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })

@@ -385,11 +385,13 @@ def reply(host_name: str, session_id: str, text: str, *, timeout: float = 180.0)
             text=True,
             timeout=timeout,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except OSError as exc:
         return {"ok": False, "error": str(exc)}
+    except subprocess.SubprocessError as exc:
+        return {"ok": False, "uncertain": True, "error": f"{exc}; check the remote conversation before retrying"}
 
     if proc.returncode != 0:
-        return {"ok": False, "error": (proc.stderr or proc.stdout or "").strip()[-200:]}
+        return {"ok": False, "uncertain": True, "error": (proc.stderr or proc.stdout or "").strip()[-200:] + "; check the remote conversation before retrying"}
 
     return {"ok": True, "host": host_name, "session": session_id, "tail": (proc.stdout or "").strip()[-120:]}
 

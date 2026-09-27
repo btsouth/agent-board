@@ -43,7 +43,7 @@ class Service(unittest.TestCase):
             with patch.object(wowclient, '_STATE_PATH', base / 'state.json'), patch.object(wowclient, 'board', return_value=snapshot), patch.object(wowclient, 'publish', return_value={'rows': snapshot['sessions']}), patch.object(wowclient, 'savedvars_path', return_value=base/'saved.lua'), patch.object(wowclient, 'read_outbox', return_value=[{}]), patch.object(wowclient, 'dispatch', side_effect=dispatch):
                 wowclient.watch(addon_dir=base, once=True, hosts_enabled=False, notify_enabled=False, health_file=health)
             value = json.loads(health.read_text())
-            self.assertEqual(set(value), {'ok', 'at', 'problems'})
+            self.assertEqual(set(value), {'ok', 'at', 'problems', 'providers', 'provider_freshness'})
             self.assertTrue(value['ok'])
             self.assertNotIn('private', health.read_text())
 

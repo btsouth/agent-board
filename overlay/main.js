@@ -17,7 +17,9 @@ const { loadOmarchyTheme, themeSignature } = require('./omarchy_theme')
 const CLI = process.env.AGENT_BOARD_CLI || path.join(__dirname, '..', 'bin', 'agent-board')
 const START_MODE = process.env.AGENT_BOARD_MODE === 'board' ? 'board' : 'badge'
 const PIN_ENABLED = process.env.AGENT_BOARD_PIN !== '0'
-const GAME_AWARE = process.env.AGENT_BOARD_GAME_AWARE === '1'
+const { Visibility } = require('./visibility')
+const VERSION = require('./package.json').version
+const visibility = new Visibility(process.env.AGENT_BOARD_VISIBILITY || (process.env.AGENT_BOARD_GAME_AWARE === '1' ? 'automatic' : 'manual'))
 const SELF_TEST = process.env.AGENT_BOARD_SELF_TEST === '1'
 const HEADLESS = SELF_TEST || process.env.AGENT_BOARD_HEADLESS === '1'
 const SELF_TEST_SCREENSHOT = process.env.AGENT_BOARD_SELF_TEST_SCREENSHOT || ''
@@ -174,47 +176,27 @@ function send(channel, payload) {
   }
 }
 
-function gameRunning() {
-  const wanted = new Set(['wow.exe', 'wowclassic.exe', 'wowb.exe', 'wowt.exe', 'wowclassic', 'wowb', 'wowt'])
-  try {
-    for (const entry of fs.readdirSync('/proc')) {
-      if (!/^\d+$/.test(entry)) continue
-      let raw = ''
-      try {
-        raw = fs.readFileSync(`/proc/${entry}/cmdline`, 'utf8')
-      } catch {
-        continue
-      }
-      const arguments_ = raw.split('\0').filter(Boolean)
-      if (!arguments_.length) continue
-      const executable = arguments_[0].replaceAll('\\', '/').split('/').pop().toLowerCase()
-      if (wanted.has(executable)) return true
-      if (executable.includes('wine')) {
-        for (const argument of arguments_.slice(1)) {
-          const name = argument.replaceAll('\\', '/').split('/').pop().toLowerCase()
-          if (wanted.has(name)) return true
-        }
-      }
-    }
-  } catch {
-    return false
-  }
-  return false
-}
-
 function syncGameVisibility() {
-  if (HEADLESS || !GAME_AWARE || !win || win.isDestroyed()) return
-  if (gameRunning()) {
+  send('wow:visibility', { policy: visibility.policy, reason: visibility.reason })
+  if (HEADLESS || !win || win.isDestroyed()) return
+  if (visibility.visible) {
     if (hiddenForGame) {
       hiddenForGame = false
       void applyMode(mode)
     }
   } else {
+    if (!hiddenForGame) ++modeEpoch
     hiddenForGame = true
+    transitioning = false
     win.setOpacity(0)
     win.setIgnoreMouseEvents(true)
     win.hide()
   }
+}
+
+function manualVisibility() {
+  visibility.set('manual')
+  syncGameVisibility()
 }
 
 async function pinWindow(nextMode, returnFocus = false) {
@@ -280,7 +262,7 @@ function applyMode(nextMode) {
       send('wow:mode', { mode: nextMode })
       return
     }
-    if (GAME_AWARE && !gameRunning()) {
+    if (!visibility.visible) {
       hiddenForGame = true
       win.setOpacity(0)
       win.setIgnoreMouseEvents(true)
@@ -337,6 +319,8 @@ async function refreshRoster() {
 }
 
 let focusedSession = ''
+let queueSessions = []
+let queueSummary = {}
 let liveWait = null
 
 // `agent-board demo` leaves a marker naming its socket and pid. While that
@@ -412,7 +396,7 @@ async function fetchLive(wait = 0) {
   // (or the wait runs out), so updates arrive as they happen, not on a timer.
   const waiting = wait > 0 && lastLiveRevision >= 0
   const response = await liveRequest(
-    { type: 'state', revision: lastLiveRevision, conversation_for: focusedSession, ...(waiting ? { wait } : {}) },
+    { type: 'state', revision: lastLiveRevision, conversation_for: focusedSession, queue_for: queueSessions, ...(waiting ? { wait } : {}) },
     waiting ? (wait + 5) * 1000 : 8000
   )
   if (response.aborted) return true
@@ -498,6 +482,7 @@ async function handleCommand(payload) {
   const command = String(payload.cmd || '')
 
   if (command.startsWith('focus:')) {
+    manualVisibility()
     const sessionId = command.slice('focus:'.length).trim()
     if (!sessionId) return { ok: false, error: 'missing session id' }
     selectedThreadId = sessionId
@@ -525,9 +510,25 @@ async function handleCommand(payload) {
   }
 
   switch (command) {
+    case 'game-state': {
+      const previous = JSON.stringify(visibility.game.window)
+      visibility.update(payload.game || { running: false })
+      syncGameVisibility()
+      if (payload.changed && visibility.policy === 'automatic' && visibility.visible && previous !== JSON.stringify(visibility.game.window)) void applyMode(mode)
+      return { ok: true }
+    }
+    case 'automatic':
+    case 'manual':
+    case 'pause':
+      visibility.set(command === 'pause' ? 'paused' : command)
+      syncGameVisibility()
+      return { ok: true, visibility: visibility.policy, reason: visibility.reason }
     case 'ping':
-      return { ok: true, mode, game_aware: GAME_AWARE, theme: omarchyTheme.name, bounds: win?.getBounds() }
+      return { ok: true, version: VERSION, mode, game_aware: visibility.policy === 'automatic',
+        visibility: visibility.policy, reason: visibility.reason, game: visibility.game, queue: queueSummary,
+        theme: omarchyTheme.name, bounds: win?.getBounds() }
     case 'toggle':
+      if (hiddenForGame) manualVisibility()
       applyMode(mode === 'board' ? 'badge' : 'board')
       return { ok: true, mode }
     case 'badge':
@@ -537,11 +538,13 @@ async function handleCommand(payload) {
       applyMode('board')
       return { ok: true, mode }
     case 'show':
+      manualVisibility()
       if (win) win.show()
       applyMode('board')
       return { ok: true, mode }
     case 'hide':
-      if (win) win.hide()
+      visibility.set('paused')
+      syncGameVisibility()
       return { ok: true, hidden: true }
     case 'refresh':
       await refreshLive()
@@ -575,9 +578,11 @@ function startControlServer() {
 
   const server = net.createServer(socket => {
     let buffer = ''
+    socket.setTimeout(5000, () => socket.destroy())
 
     socket.on('data', chunk => {
       buffer += chunk.toString()
+      if (buffer.length > 65536) { socket.destroy(); return }
 
       let index
       while ((index = buffer.indexOf('\n')) >= 0) {
@@ -591,6 +596,7 @@ function startControlServer() {
         let payload
         try {
           payload = JSON.parse(line)
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('bad command')
         } catch {
           socket.write(`${JSON.stringify({ ok: false, error: 'bad json' })}\n`)
           continue
@@ -607,7 +613,7 @@ function startControlServer() {
           continue
         }
 
-        void handleCommand(payload).then(result => {
+        void handleCommand(payload).catch(error => ({ ok: false, error: error.message })).then(result => {
           try {
             socket.write(`${JSON.stringify(result)}\n`)
           } catch {
@@ -688,6 +694,7 @@ function createWindow() {
   // whatever we already know is replayed the moment the page can hear it.
   win.webContents.on('did-finish-load', () => {
     win.webContents.send('wow:mode', { mode })
+    send('wow:visibility', { policy: visibility.policy, reason: visibility.reason })
     win.webContents.send('wow:theme', omarchyTheme)
     if (latestRoster) {
       win.webContents.send('wow:roster', latestRoster)
@@ -716,6 +723,14 @@ function createWindow() {
   }
   win.once('ready-to-show', showFirst)
   win.webContents.once('did-finish-load', showFirst)
+
+  let positionTimer
+  const schedulePosition = () => {
+    clearTimeout(positionTimer)
+    positionTimer = setTimeout(() => void samplePosition(), 250)
+  }
+  win.on('move', schedulePosition)
+  win.on('resize', schedulePosition)
 
   win.on('closed', () => {
     win = null
@@ -783,6 +798,15 @@ ipcMain.on('wow:open-external', (_event, url) => {
   } catch {}
 })
 
+ipcMain.on('wow:queue-sessions', (_event, sessions, summary) => {
+  queueSummary = Object.fromEntries(['queued', 'sending', 'sent', 'held'].map(key => [key, Math.max(0, Math.min(10000, Number(summary?.[key]) || 0))]))
+  const next = Array.isArray(sessions) ? [...new Set(sessions.filter(id => typeof id === 'string'))].slice(0, 128) : []
+  if (JSON.stringify(next) === JSON.stringify(queueSessions)) return
+  queueSessions = next
+  lastLiveRevision = -1
+  liveWait?.done({ ok: false, aborted: true })
+})
+
 ipcMain.on('wow:select', (_event, sessionId) => {
   const next = String(sessionId || '')
   if (next === focusedSession) return
@@ -819,9 +843,9 @@ void (async () => {
   startControlServer()
   startRosterLoop()
   startThemeWatcher()
-  setInterval(() => void samplePosition(), 500)
+  setInterval(() => void samplePosition(), 5000)
   applyOmarchyTheme(omarchyTheme)
-  if (GAME_AWARE) gameTimer = setInterval(syncGameVisibility, 3000)
+  gameTimer = setInterval(syncGameVisibility, 1000)
 })()
 
 process.on('SIGTERM', () => app.exit(0))

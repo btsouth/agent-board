@@ -2,7 +2,9 @@
 function badgeState(board, connected, queued = 0) {
   if (!connected) return { label: 'Reconnecting…', detail: 'Messages and drafts are kept', attention: false }
   const sessions = board.sessions || []
-  const available = session => !board.providers?.[session.provider] || board.providers[session.provider] === 'ok'
+  const available = session => session.host && session.host !== 'local'
+    ? !session.host_offline && board.hosts?.[session.host] === 'ok'
+    : !board.providers?.[session.provider] || board.providers[session.provider] === 'ok'
   const running = sessions.filter(session => available(session) && (session.status === 'working' || session.status === 'starting'))
   const requests = sessions.filter(session => available(session) && (session.approval_request_id || session.user_input_request_id))
   const latest = sessions.filter(session => ['finished', 'reply'].includes(session.status))

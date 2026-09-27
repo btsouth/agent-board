@@ -119,6 +119,11 @@
           </div>
           <button id="add-project-button" class="add-project" type="button">Add a project folder</button>
           <div id="selected-project-path"></div>
+          <label for="new-session-permissions">Permissions</label>
+          <select id="new-session-permissions">
+            <option value="approval-required">Ask for approvals</option>
+            <option value="full-access">Full access</option>
+          </select>
           <label for="new-session-prompt">Prompt</label>
           <textarea id="new-session-prompt" rows="6" placeholder="What should the agent do?"></textarea>
           <div class="modal-actions">
@@ -132,6 +137,11 @@
 
       <footer id="board-footer">
         <span id="board-status">Waiting for the live bridge.</span>
+        <select id="visibility-policy" aria-label="Overlay visibility">
+          <option value="automatic">Automatic</option>
+          <option value="manual">Manual</option>
+          <option value="paused">Pause until WoW exits</option>
+        </select>
         <span id="session-window"></span>
       </footer>
     </div>

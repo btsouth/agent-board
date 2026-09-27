@@ -54,6 +54,22 @@ class Updates(unittest.TestCase):
         self.assertIn(("checkout", "--detach", "v0.8.0"), self.calls)
         self.mocks[-1].assert_called_once_with(self.root, self.manifest, None)
 
+    def test_bootstrap_updater_can_recover_a_stopped_managed_install(self):
+        self.manifest['hermes_home'] = None
+        self.manifest['t3_home'] = '/custom/t3'
+        self.mocks[-3].side_effect = [RuntimeError('inactive'), '']
+        with patch.object(updater, '__file__', '/temporary/download/agentboard/updater.py'):
+            result = updater.update(types.SimpleNamespace(managed=True))
+        self.assertTrue(result['updated'])
+        self.mocks[-1].assert_called_once_with(self.root, self.manifest, None)
+
+    def test_bootstrap_updater_still_refuses_dirty_work(self):
+        self.dirty = ' M personal.txt'
+        with patch.object(updater, '__file__', '/temporary/download/agentboard/updater.py'):
+            with self.assertRaisesRegex(RuntimeError, 'local changes'):
+                updater.update(types.SimpleNamespace(managed=True))
+        self.mocks[-1].assert_not_called()
+
     def test_missing_install(self):
         self.manifest = None
         with self.assertRaisesRegex(RuntimeError, "No managed"): updater.update()
@@ -155,7 +171,7 @@ class GitIntegration(unittest.TestCase):
             git("tag", "v0.8.0")
             git("checkout", "--detach", "v0.7.0")
             git("remote", "add", "origin", "https://github.com/btsouth/agent-board.git")
-            manifest = dict(app_root=str(root), addon_dir="/game/AddOns", hermes_home="/hermes", python=sys.executable)
+            manifest = dict(app_root=str(root), addon_dir="/game/AddOns", hermes_home=None, t3_home="/custom/t3", python=sys.executable)
             original_git = updater._git
             original_run = updater._run
             observed = []

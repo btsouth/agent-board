@@ -26,16 +26,26 @@ def send(command: str, **payload) -> dict:
         try:
             client.connect(str(path))
             client.sendall(message.encode())
-            raw = client.recv(65536)
+            deadline = time.monotonic() + 5.0
+            raw = bytearray()
+            while b"\n" not in raw:
+                client.settimeout(max(0.001, deadline - time.monotonic()))
+                chunk = client.recv(4096)
+                if not chunk:
+                    raise RuntimeError("overlay closed before confirming the command")
+                raw.extend(chunk)
+                if len(raw) > 65536 or time.monotonic() >= deadline:
+                    raise RuntimeError("overlay response exceeded its size or time limit")
         except OSError as exc:
             raise RuntimeError(f"overlay did not answer: {exc}") from exc
 
-    if not raw:
-        return {"ok": True}
     try:
-        return json.loads(raw.decode("utf-8", "replace").strip().splitlines()[-1])
-    except (json.JSONDecodeError, IndexError):
-        return {"ok": True, "raw": raw.decode("utf-8", "replace").strip()}
+        reply = json.loads(bytes(raw).split(b"\n", 1)[0])
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError("overlay returned invalid JSON") from exc
+    if not isinstance(reply, dict) or not isinstance(reply.get("ok"), bool):
+        raise RuntimeError("overlay returned an invalid confirmation")
+    return reply
 
 
 def is_running() -> bool:

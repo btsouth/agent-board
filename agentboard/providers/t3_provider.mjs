@@ -58,10 +58,19 @@ function readJson(filePath, fallback = null) {
   }
 }
 
-async function writeJsonAtomic(filePath, value) {
-  const temp = `${filePath}.${process.pid}.tmp`;
-  await fsp.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  await fsp.rename(temp, filePath);
+const writes = new Map();
+function writeJsonAtomic(filePath, value) {
+  const content = `${JSON.stringify(value, null, 2)}\n`;
+  const next = (writes.get(filePath) || Promise.resolve()).catch(() => {}).then(async () => {
+    const temp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await fsp.writeFile(temp, content, { mode: 0o600 });
+      await fsp.rename(temp, filePath);
+    } finally { await fsp.unlink(temp).catch(() => {}); }
+  });
+  writes.set(filePath, next);
+  void next.finally(() => { if (writes.get(filePath) === next) writes.delete(filePath); }).catch(() => {});
+  return next;
 }
 
 function truncate(value, length) {
@@ -242,7 +251,9 @@ class T3RpcClient {
         cleanup();
         reject(new Error(`T3 WebSocket closed before opening (${event.code}).`));
       };
+      const timer = setTimeout(() => { cleanup(); this.socket?.close(); reject(new Error("T3 connection timed out.")); }, 10000);
       const cleanup = () => {
+        clearTimeout(timer);
         this.socket?.removeEventListener("open", onOpen);
         this.socket?.removeEventListener("error", onError);
         this.socket?.removeEventListener("close", onClose);
@@ -253,13 +264,13 @@ class T3RpcClient {
     });
     this.socket.addEventListener("message", (event) => this.handleMessage(event.data));
     this.socket.addEventListener("close", () => {
-      for (const { reject } of this.pending.values()) reject(new Error("T3 WebSocket closed."));
+      for (const { reject } of this.pending.values()) reject(Object.assign(new Error("T3 WebSocket closed. Delivery may be uncertain."), { uncertain: true }));
       this.pending.clear();
       this.streams.clear();
       if (!this.closed) log("T3 WebSocket closed");
     });
     this.socket.addEventListener("error", (event) => log("T3 WebSocket error", event.message || String(event)));
-    this.heartbeat = setInterval(() => this.send({ _tag: "Ping" }), HEARTBEAT_MS);
+    this.heartbeat = setInterval(() => { try { this.send({ _tag: "Ping" }); } catch { this.close(); } }, HEARTBEAT_MS);
     this.heartbeat.unref?.();
   }
 
@@ -268,6 +279,8 @@ class T3RpcClient {
     clearInterval(this.heartbeat);
     this.socket?.close();
     this.socket = null;
+    for (const { reject } of this.pending.values()) reject(Object.assign(new Error("T3 disconnected. Check delivery before retrying."), { uncertain: true }));
+    this.pending.clear();
   }
 
   send(message) {
@@ -280,10 +293,18 @@ class T3RpcClient {
   request(tag, payload) {
     const id = String(this.nextId++);
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(Object.assign(new Error("T3 request timed out. Check the conversation before retrying."), { uncertain: true }));
+      }, 30000);
+      this.pending.set(id, {
+        resolve: value => { clearTimeout(timer); resolve(value); },
+        reject: error => { clearTimeout(timer); reject(error); },
+      });
       try {
         this.send({ _tag: "Request", id, tag, payload, headers: [] });
       } catch (error) {
+        clearTimeout(timer);
         this.pending.delete(id);
         reject(error);
       }
@@ -413,6 +434,7 @@ class Bridge {
         );
         await this.runConnectedLoop();
       } catch (error) {
+        this.client?.close();
         this.connected = false;
         this.latestNotice = `T3 unavailable: ${error instanceof Error ? error.message : String(error)}`;
         log("Bridge connection failed", this.latestNotice);
@@ -425,7 +447,7 @@ class Bridge {
 
   async runConnectedLoop() {
     while (!this.stopping && this.client?.socket?.readyState === WebSocket.OPEN) {
-      if (Date.now() - this.lastReconcileAt >= SHELL_RECONCILE_MS) {
+      if (Date.now() - this.lastReconcileAt >= (this.hasActiveThreads() ? SHELL_RECONCILE_MS : 10000)) {
         this.lastReconcileAt = Date.now();
         await this.reconcileShell().catch((error) => {
           log("Could not reconcile T3 shell", error instanceof Error ? error.message : String(error));
@@ -437,6 +459,10 @@ class Bridge {
     this.connected = false;
     this.client?.close();
     await sleep(RECONNECT_MS);
+  }
+
+  hasActiveThreads() {
+    return [...this.threads.values()].some(thread => thread.latestTurn?.state === 'running' || thread.session?.status === 'running');
   }
 
   async reconcileShell() {
@@ -480,6 +506,7 @@ class Bridge {
         title: action.title || "",
         answers: action.answers,
         requestId: action.request_id,
+        runtimeMode: action.runtime_mode,
       });
       process.stdout.write(`${JSON.stringify({ type: "result", id: request.id, ...result })}\n`);
       await this.publish();
@@ -490,6 +517,7 @@ class Bridge {
           id: request?.id ?? null,
           ok: false,
           message: error instanceof Error ? error.message : String(error),
+          uncertain: Boolean(error?.uncertain),
         })}\n`,
       );
     }
@@ -527,7 +555,8 @@ class Bridge {
   }
 
   openDatabase() {
-    if (this.database || !fs.existsSync(databasePath)) return;
+    if (this.database) return;
+    if (!fs.existsSync(databasePath)) { this.storeError = "T3 session store is unavailable."; return; }
     try {
       this.database = new DatabaseSync(databasePath, { readOnly: true });
       this.statements = {
@@ -571,6 +600,8 @@ class Bridge {
       };
     } catch (error) {
       log("Could not open T3 database read-only", error instanceof Error ? error.message : String(error));
+      this.storeError = "T3 session store could not be opened.";
+      this.database?.close();
       this.database = null;
       this.statements = null;
     }
@@ -583,6 +614,7 @@ class Bridge {
       return this.statements[statement].get(...params);
     } catch (error) {
       log("T3 database query failed", { statement, error: String(error) });
+      this.storeError = "T3 session store could not be read.";
       return undefined;
     }
   }
@@ -613,11 +645,24 @@ class Bridge {
       return this.statements[statement].all(...params);
     } catch (error) {
       log("T3 database query failed", { statement, error: String(error) });
+      this.storeError = "T3 session store could not be read.";
       return [];
     }
   }
 
   threadView(thread) {
+    this.viewCache ||= new Map();
+    const key = JSON.stringify([thread, this.state.seen[thread.id], this.state.unread?.[thread.id]]);
+    const cached = this.viewCache.get(thread.id);
+    const active = ['running', 'starting'].includes(thread.session?.status) || thread.latestTurn?.state === 'running' || thread.backgroundLiveness === 'working';
+    const recentChange = Date.now() - safeTime(thread.updatedAt) < 10000;
+    if (!active && !thread.hasPendingApprovals && !recentChange && cached?.key === key && Date.now() - cached.at < 10000) return cached.value;
+    const value = this.readThreadView(thread);
+    this.viewCache.set(thread.id, { key, at: Date.now(), value });
+    return value;
+  }
+
+  readThreadView(thread) {
     const session = thread.session;
     const latestTurn = thread.latestTurn;
     const pendingApproval = this.query("pendingApproval", thread.id);
@@ -721,6 +766,10 @@ class Bridge {
   async publish() {
     this.lastPublishAt = Date.now();
     let enriched = [];
+    if (this.storeError) { this.viewCache?.clear(); this.toolCache?.clear(); }
+    this.storeError = "";
+    for (const id of this.viewCache?.keys() || []) if (!this.threads.has(id)) this.viewCache.delete(id);
+    for (const id of this.toolCache?.keys() || []) if (!this.threads.has(id)) this.toolCache.delete(id);
     try {
       enriched = [...this.threads.values()]
         .filter((thread) => !thread.deletedAt && !thread.archivedAt)
@@ -743,7 +792,8 @@ class Bridge {
       `${JSON.stringify({
         type: "snapshot",
         connected: this.connected,
-        notice: this.latestNotice,
+        notice: this.latestNotice || this.storeError,
+        error: this.storeError || "",
         projects: [...this.projects.values()].map((project) => ({
           id: project.id,
           title: project.title,
@@ -814,7 +864,7 @@ class Bridge {
           text: action.text,
           attachments: [],
         },
-        runtimeMode: thread.runtimeMode || "full-access",
+        runtimeMode: thread.runtimeMode || "approval-required",
         interactionMode: thread.interactionMode || "default",
         createdAt: now,
       });
@@ -861,6 +911,8 @@ class Bridge {
       const defaultSelection = project?.defaultModelSelection || readDefaultModelSelection();
       if (!project) throw new Error(`Project ${action.sessionId} is no longer available.`);
       if (!defaultSelection) throw new Error("No default model is configured for this project.");
+      const runtimeMode = action.runtimeMode || "approval-required";
+      if (!["approval-required", "full-access"].includes(runtimeMode)) throw new Error("Choose a supported permission mode.");
       const threadId = randomUUID();
       const title = firstLine(action.text);
       await this.client.request("orchestration.dispatchCommand", {
@@ -875,14 +927,14 @@ class Bridge {
         },
         modelSelection: defaultSelection,
         titleSeed: title,
-        runtimeMode: "full-access",
+        runtimeMode,
         interactionMode: "default",
         bootstrap: {
           createThread: {
             projectId: project.id,
             title,
             modelSelection: defaultSelection,
-            runtimeMode: "full-access",
+            runtimeMode,
             interactionMode: "default",
             branch: null,
             worktreePath: null,

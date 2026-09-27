@@ -70,7 +70,7 @@ class MessageQueue {
     this.inflight.add(key)
     item.state = 'sending'
     item.baseline = this.count(session, item.text)
-    item.baselineIds = (session.conversation || []).map(message => message.id).filter(Boolean)
+    item.baselineIds = (session.message_receipts || session.conversation || []).map(message => message.id).filter(Boolean)
     item.sawActive = false
     delete item.error
     try {
@@ -78,6 +78,11 @@ class MessageQueue {
       const request = Promise.resolve(this.send({ ...item.action, ...(immediate ? { delivery: 'immediate' } : { delivery: 'queued' }) }))
       this.requests.set(key, request)
       const result = await request
+      const webcrypto = globalThis.crypto || (typeof require === 'function' ? require('node:crypto').webcrypto : null)
+      if (webcrypto?.subtle) {
+        const hash = await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(item.text))
+        item.digest = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')
+      }
       if (!result?.ok) throw new Error(result?.error || result?.message || 'Delivery failed. Check the conversation before retrying.')
       item.state = 'sent'
       item.messageId = result.message_id
@@ -102,7 +107,8 @@ class MessageQueue {
     if (!connected) return
     const sends = []
     for (const session of board.sessions || []) {
-      if (board.providers?.[session.provider] && board.providers[session.provider] !== 'ok') continue
+      if (session.host_offline || (session.host && session.host !== 'local' && board.hosts?.[session.host] !== 'ok')) continue
+      if ((!session.host || session.host === 'local') && board.providers?.[session.provider] && board.providers[session.provider] !== 'ok') continue
       const items = this.list(session)
       if (!items.length || this.inflight.has(this.key(session))) continue
       const head = items[0]
@@ -112,11 +118,15 @@ class MessageQueue {
           (head.messageId ? message.id === head.messageId :
             message.text === head.text && message.id && !(head.baselineIds || []).includes(message.id))) ||
           this.count(session, head.text) > head.baseline
-        const messages = session.conversation || []
+        const messages = session.message_receipts || session.conversation || []
+        const receiptIndex = messages.findIndex(message => message.role === 'user' &&
+          (head.messageId ? message.id === head.messageId : head.digest && message.digest === head.digest &&
+            message.id && !(head.baselineIds || []).includes(message.id)))
+        const receiptFinished = receiptIndex >= 0 && messages.slice(receiptIndex + 1).some(message => ['agent', 'assistant'].includes(message.role))
         // A fast turn can start and finish between polls. Its persisted user row
         // and subsequent assistant response also prove the turn boundary.
         const fastFinished = visible && messages.at(-1)?.role !== 'user'
-        if (!this.active(session) && !this.blocked(session) && (head.sawActive || fastFinished)) {
+        if (!this.active(session) && !this.blocked(session) && (head.sawActive || fastFinished || receiptFinished)) {
           this.items = this.items.filter(item => item !== head)
           this.save()
         }

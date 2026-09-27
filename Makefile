@@ -32,6 +32,8 @@ check-node: ## Omarchy theme discovery and JavaScript syntax
 	node tests/message_queue_test.js
 	node tests/badge_state_test.js
 	node tests/markdown_test.js
+	node tests/visibility_test.js
+	node tests/provider_runtime_test.cjs
 
 check-python: ## Roster, wire format, hostile input, hosts, lint, package, notifications
 	$(PY) tests/roster_test.py
@@ -45,6 +47,7 @@ check-python: ## Roster, wire format, hostile input, hosts, lint, package, notif
 	$(PY) tests/live_test.py -v
 	$(PY) tests/overlay_regression_test.py -v
 	$(PY) tests/t3_test.py -v
+	$(PY) tests/runtime_test.py -v
 	$(PY) tests/bootstrap_test.py
 	$(PY) tests/setup_test.py -v
 	$(PY) tests/update_test.py -v

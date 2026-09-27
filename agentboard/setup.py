@@ -181,7 +181,8 @@ def _configure(*, addon_dir=None, hermes_home=None, t3_home=None, yes=False, for
         health = BASE / 'service-health.json'
         health.unlink(missing_ok=True)
         command = [str(python), '-c', 'import sys; sys.path.insert(0, sys.argv.pop(1)); from agentboard.cli import main; raise SystemExit(main())', str(ROOT), 'wow', 'watch', '--addon-dir', str(target), '--quiet', '--health-file', str(health)]
-        environment = {'T3CODE_HOME': str(t3_home)}
+        environment = {'T3CODE_HOME': str(t3_home),
+                       'AGENT_BOARD_PROVIDERS': ','.join(name for name, enabled in [('hermes', hermes_enabled), ('t3', t3_available)] if enabled)}
         if hermes_enabled:
             environment['HERMES_HOME'] = str(home)
         environment.update({name: str(Path(os.environ.get(name) or Path.home() / default).resolve()) for name, default in (('XDG_STATE_HOME', '.local/state'), ('XDG_CONFIG_HOME', '.config'), ('XDG_DATA_HOME', '.local/share'))})
@@ -288,6 +289,36 @@ def command(args):
         return 1
 
 
+def runtime_status():
+    """Small diagnostics without prompts, credentials, or transcript contents."""
+    from . import control, state
+    print(f"Installed version: {wowclient.BRIDGE_VERSION}")
+    try:
+        overlay = control.send('ping')
+        print(f"Overlay: {overlay.get('version', 'older release')}; {overlay.get('visibility', 'automatic' if overlay.get('game_aware') else 'manual')}; {overlay.get('reason', overlay.get('mode', 'unknown'))}")
+        queue = overlay.get('queue') or {}
+        if any(queue.values()):
+            print(f"Messages: {queue.get('queued', 0)} queued; {queue.get('sending', 0)} sending; {queue.get('sent', 0)} awaiting turn completion; {queue.get('held', 0)} need review")
+    except RuntimeError:
+        print('Overlay: stopped')
+    try:
+        game = json.loads((state.STATE_DIR / 'game-state.json').read_text())
+        age = max(0, int(time.time() - game.get('at', 0)))
+        window = game.get('window') or {}
+        print(f"WoW: {'running' if game.get('running') else 'stopped'}; window {'detected' if window else 'not detected'}; checked {age}s ago")
+    except (OSError, ValueError, TypeError):
+        print('WoW: detection has not published yet')
+    health_path = BASE / 'service-health.json'
+    try:
+        health = json.loads(health_path.read_text())
+        for provider, status in health.get('providers', {}).items():
+            stamp = health.get('provider_freshness', {}).get(provider)
+            fresh = f"; received {max(0, int(time.time() - stamp))}s ago" if stamp else ''
+            print(f"{provider}: {status}{fresh}")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
 def status():
     """Report actionable health without printing any session content."""
     try:
@@ -295,6 +326,7 @@ def status():
         if not manifest:
             print('Not configured. Run agent-board setup.')
             return 1
+        runtime_status()
         active = systemctl('is-active', 'agent-board.service', check=False).returncode == 0
         enabled = systemctl('is-enabled', 'agent-board.service', check=False).returncode == 0
         print(f"Addon: {manifest['addon_dir']}/AgentBoard")
