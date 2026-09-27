@@ -53,7 +53,7 @@ SESSION_ID_RE = re.compile(r"[A-Za-z0-9_.-]{8,}")
 # know, so both sides can be updated independently without silent nonsense.
 PAYLOAD_TAG = "HE1"
 PAYLOAD_SCHEMA = 5
-BRIDGE_VERSION = "0.2.7"
+BRIDGE_VERSION = "0.2.8"
 
 _INSTALL_HINTS = (
     "/mnt/data/Games/World of Warcraft",

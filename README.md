@@ -42,7 +42,7 @@ The bridge is tested on Linux. Windows and macOS bridge hosts are not verified.
 For a managed installation:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.7/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.8/install.sh | bash
 ```
 
 The installer downloads the tagged release under
@@ -242,7 +242,7 @@ measure Blizzard's font renderer.
 
 ## Status
 
-Version `0.2.7` is a preview. The bridge and addon are tested together, but the
+Version `0.2.8` is a preview. The bridge and addon are tested together, but the
 in-game layout and provider-specific approval/input flows should be exercised in
 the target client after installation.
 
@@ -263,7 +263,7 @@ For an older managed installation, especially a T3-only 0.2.6 install, use the
 new bootstrap's updater:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.7/install.sh | bash -s -- --update
+curl -fsSL https://raw.githubusercontent.com/btsouth/agent-board/v0.2.8/install.sh | bash -s -- --update
 ```
 
 This checks the managed checkout before changing it and keeps recovery on the
